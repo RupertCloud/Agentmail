@@ -8,7 +8,12 @@ export interface Harness {
   provider: MemoryProvider;
 }
 
-export function newHarness(overrides: Partial<Harness> = {}): Harness {
+export interface HarnessOptions {
+  /** Stands in for the webhook HTTP client. */
+  fetcher?: (url: string, init: any) => Promise<{ ok: boolean; status: number }>;
+}
+
+export function newHarness(options: HarnessOptions = {}): Harness {
   const provider = new MemoryProvider();
   const platform = new Platform({
     provider,
@@ -20,9 +25,9 @@ export function newHarness(overrides: Partial<Harness> = {}): Harness {
       initialDailySendLimit: 1000,
       secret: 'test-secret',
     },
-    fetcher: async () => ({ ok: true, status: 200 }),
+    fetcher: options.fetcher ?? (async () => ({ ok: true, status: 200 })),
   });
-  return { platform, provider, ...overrides };
+  return { platform, provider };
 }
 
 /** Creates an account with a pre-verified sending domain. */
@@ -59,4 +64,46 @@ export async function seedAgent(
     agentId: agent.id,
   });
   return { agent, apiKey: secret };
+}
+
+/* --------------------------------------------------------------- http */
+
+export interface RunningServer {
+  baseUrl: string;
+  close: () => Promise<void>;
+}
+
+export async function startServer(platform: Platform): Promise<RunningServer> {
+  const { createServer } = await import('../src/http/server.js');
+  const server = createServer(platform);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections?.();
+        server.close(() => resolve());
+      }),
+  };
+}
+
+export async function api(
+  baseUrl: string,
+  apiKey: string,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<{ status: number; json: any }> {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method,
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await response.text();
+  return { status: response.status, json: text ? JSON.parse(text) : null };
 }
