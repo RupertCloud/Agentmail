@@ -252,3 +252,200 @@ test('unknown routes and bad credentials answer predictably', async (t) => {
   assert.equal(health.status, 200);
   assert.equal(((await health.json()) as any).status, 'ok');
 });
+
+test('a key scoped to one domain cannot send from another', async (t) => {
+  const { platform } = newHarness();
+  const { account, apiKey } = await seedAccount(platform, 'acme', 'acme.test');
+  const other = await platform.domains.add(account.id, 'other.test');
+  await platform.store.updateDomain(other.id, { status: 'verified', verifiedAt: new Date().toISOString() });
+
+  const [acme] = (await platform.domains.list(account.id)).filter((d) => d.domain === 'acme.test');
+  const scoped = await platform.accounts.createApiKey(account.id, 'acme-only', 'send', {
+    domainId: acme.id,
+  });
+  const server = await startServer(platform);
+  t.after(async () => {
+    await server.close();
+    await platform.close();
+  });
+
+  const allowed = await api(server.baseUrl, scoped.secret, 'POST', '/v1/emails', {
+    from: 'hello@acme.test',
+    to: ['someone@example.test'],
+    subject: 'Fine',
+    text: 'fine',
+  });
+  assert.equal(allowed.status, 202);
+
+  const refused = await api(server.baseUrl, scoped.secret, 'POST', '/v1/emails', {
+    from: 'hello@other.test',
+    to: ['someone@example.test'],
+    subject: 'Not fine',
+    text: 'nope',
+  });
+  assert.equal(refused.status, 403);
+  assert.match(refused.json.error.message, /only send from acme\.test/);
+
+  // An unscoped key on the same account may still use either domain.
+  const unscoped = await api(server.baseUrl, apiKey, 'POST', '/v1/emails', {
+    from: 'hello@other.test',
+    to: ['someone@example.test'],
+    subject: 'Fine too',
+    text: 'fine',
+  });
+  assert.equal(unscoped.status, 202);
+});
+
+test('scheduling is capped at 30 days ahead', async (t) => {
+  const { platform } = newHarness();
+  const { apiKey } = await seedAccount(platform, 'acme', 'acme.test');
+  const server = await startServer(platform);
+  t.after(async () => {
+    await server.close();
+    await platform.close();
+  });
+
+  const within = new Date(Date.now() + 29 * 24 * 3600_000).toISOString();
+  const beyond = new Date(Date.now() + 31 * 24 * 3600_000).toISOString();
+  const base = { from: 'hello@acme.test', to: ['someone@example.test'], subject: 'Later', text: 'later' };
+
+  const ok = await api(server.baseUrl, apiKey, 'POST', '/v1/emails', { ...base, scheduled_at: within });
+  assert.equal(ok.status, 202);
+  assert.equal(ok.json.status, 'scheduled');
+
+  const rejected = await api(server.baseUrl, apiKey, 'POST', '/v1/emails', { ...base, scheduled_at: beyond });
+  assert.equal(rejected.status, 400);
+  assert.equal(rejected.json.error.field, 'scheduled_at');
+
+  const malformed = await api(server.baseUrl, apiKey, 'POST', '/v1/emails', {
+    ...base,
+    scheduled_at: 'next tuesday',
+  });
+  assert.equal(malformed.status, 400);
+});
+
+test('lists and suppressions export as CSV, and suppressions are searchable', async (t) => {
+  const { platform } = newHarness();
+  const { account, apiKey } = await seedAccount(platform, 'acme', 'acme.test');
+  const list = await platform.lists.create(account.id, 'Announcements');
+  await platform.lists.import(account.id, list.id, [
+    { email: 'a@example.test', name: 'Doe, John', company: 'Acme' },
+    { email: 'b@example.test', name: 'B' },
+  ]);
+  await platform.suppression.add(account.id, 'angry@example.test', 'complaint');
+  await platform.suppression.add(account.id, 'gone@other.test', 'hard_bounce');
+
+  const server = await startServer(platform);
+  t.after(async () => {
+    await server.close();
+    await platform.close();
+  });
+
+  const listCsv = await fetch(`${server.baseUrl}/v1/lists/${list.id}/export`, {
+    headers: { authorization: `Bearer ${apiKey}` },
+  });
+  assert.match(listCsv.headers.get('content-type') ?? '', /text\/csv/);
+  const listBody = await listCsv.text();
+  assert.match(listBody.split('\r\n')[0], /^email,name,status,source,confirmed_at,created_at,company$/);
+  assert.match(listBody, /"Doe, John"/, 'a comma in a field must be quoted');
+
+  const search = await api(server.baseUrl, apiKey, 'GET', '/v1/suppressions?q=other.test');
+  assert.equal(search.json.data.length, 1);
+  assert.equal(search.json.data[0].email, 'gone@other.test');
+
+  const byReason = await api(server.baseUrl, apiKey, 'GET', '/v1/suppressions?reason=complaint');
+  assert.equal(byReason.json.data.length, 1);
+  assert.equal(byReason.json.data[0].email, 'angry@example.test');
+
+  const suppressionCsv = await fetch(`${server.baseUrl}/v1/suppressions/export`, {
+    headers: { authorization: `Bearer ${apiKey}` },
+  });
+  const suppressionBody = await suppressionCsv.text();
+  assert.match(suppressionBody, /^email,reason,list_id,note,created_at/);
+  assert.equal(suppressionBody.trim().split('\r\n').length, 3);
+});
+
+test('a webhook delivery can be replayed', async (t) => {
+  const attempts: string[] = [];
+  const { platform } = newHarness({
+    fetcher: async (_url, init) => {
+      attempts.push(init.body);
+      return { ok: true, status: 200 };
+    },
+  });
+  const { account, apiKey } = await seedAccount(platform, 'acme', 'acme.test');
+  const webhook = await platform.webhooks.create(account.id, 'https://hooks.example.test/x', ['sent']);
+  const server = await startServer(platform);
+  t.after(async () => {
+    await server.close();
+    await platform.close();
+  });
+
+  await platform.sending.send(account, {
+    from: 'auth@acme.test',
+    to: 'user@example.test',
+    subject: 'Hook',
+    text: 'hi',
+  });
+  await platform.drain();
+  const before = attempts.length;
+  assert.ok(before >= 1);
+
+  const deliveries = await api(server.baseUrl, apiKey, 'GET', `/v1/webhooks/${webhook.id}/deliveries`);
+  assert.equal(deliveries.json.data[0].status, 'succeeded');
+
+  const replay = await api(
+    server.baseUrl,
+    apiKey,
+    'POST',
+    `/v1/webhooks/${webhook.id}/deliveries/${deliveries.json.data[0].id}/replay`,
+  );
+  assert.equal(replay.status, 202);
+
+  await platform.drain();
+  assert.equal(attempts.length, before + 1);
+  assert.match(attempts[attempts.length - 1], /"replay":true/);
+});
+
+test('the message log filters by tag and records administrative actions', async (t) => {
+  const { platform } = newHarness();
+  const { account, apiKey } = await seedAccount(platform, 'acme', 'acme.test');
+  const server = await startServer(platform);
+  t.after(async () => {
+    await server.close();
+    await platform.close();
+  });
+
+  const base = { from: 'auth@acme.test', to: ['user@example.test'], subject: 'Tagged', text: 'hi' };
+  await api(server.baseUrl, apiKey, 'POST', '/v1/emails', { ...base, tags: { order: '4711' } });
+  await api(server.baseUrl, apiKey, 'POST', '/v1/emails', { ...base, tags: { order: '4712' } });
+  await api(server.baseUrl, apiKey, 'POST', '/v1/emails', { ...base, tags: { kind: 'alert' } });
+
+  const byKey = await api(server.baseUrl, apiKey, 'GET', '/v1/emails?tag=order');
+  assert.equal(byKey.json.data.length, 2);
+
+  const byValue = await api(server.baseUrl, apiKey, 'GET', '/v1/emails?tag=order:4711');
+  assert.equal(byValue.json.data.length, 1);
+
+  const noMatch = await api(server.baseUrl, apiKey, 'GET', '/v1/emails?tag=order:9999');
+  assert.equal(noMatch.json.data.length, 0);
+
+  // Administrative actions leave an audit trail (FR-12.8).
+  const agent = await api(server.baseUrl, apiKey, 'POST', '/v1/agents', { display_name: 'auditor' });
+  await api(server.baseUrl, apiKey, 'DELETE', `/v1/agents/${agent.json.id}`);
+  const suppression = await platform.suppression.add(account.id, 'lift@example.test', 'manual');
+  await api(server.baseUrl, apiKey, 'DELETE', `/v1/suppressions/${suppression.id}`);
+
+  const audit = await api(server.baseUrl, apiKey, 'GET', '/v1/audit');
+  const actions = audit.json.data.map((entry: { action: string }) => entry.action);
+  for (const expected of [
+    'account.created',
+    'api_key.created',
+    'domain.added',
+    'agent.created',
+    'agent.removed',
+    'suppression.removed',
+  ]) {
+    assert.ok(actions.includes(expected), `audit log is missing ${expected}`);
+  }
+});

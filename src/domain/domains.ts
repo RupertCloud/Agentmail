@@ -4,6 +4,7 @@ import { badRequest, conflict, notFound } from '../errors.js';
 import type { Store } from '../store/types.js';
 import type { DnsRecord, Domain, Id } from '../types.js';
 import { newId } from '../util/ids.js';
+import { audit } from './audit.js';
 import type { DnsResolver } from './dns.js';
 
 const DOMAIN_RE = /^(?!-)[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$/;
@@ -57,7 +58,7 @@ export class DomainService {
       },
     ];
 
-    return this.store.createDomain({
+    const created = await this.store.createDomain({
       id: newId('dom'),
       accountId,
       domain,
@@ -69,6 +70,14 @@ export class DomainService {
       verifiedAt: null,
       createdAt: new Date().toISOString(),
     });
+    await audit(this.store, {
+      accountId,
+      actor: 'api',
+      action: 'domain.added',
+      target: created.id,
+      metadata: { domain },
+    });
+    return created;
   }
 
   async get(accountId: Id, id: Id): Promise<Domain> {
@@ -82,8 +91,15 @@ export class DomainService {
   }
 
   async remove(accountId: Id, id: Id): Promise<void> {
-    await this.get(accountId, id);
+    const domain = await this.get(accountId, id);
     await this.store.deleteDomain(id);
+    await audit(this.store, {
+      accountId,
+      actor: 'api',
+      action: 'domain.removed',
+      target: id,
+      metadata: { domain: domain.domain },
+    });
   }
 
   /**
@@ -103,12 +119,22 @@ export class DomainService {
     const verified = required.every((r) => r.status === 'verified');
     const warnings = await this.diagnose(domain, records);
 
-    return this.store.updateDomain(id, {
+    const updated = await this.store.updateDomain(id, {
       records,
       warnings,
       status: verified ? 'verified' : 'pending',
       verifiedAt: verified ? domain.verifiedAt ?? new Date().toISOString() : null,
     });
+    if (updated.status !== domain.status) {
+      await audit(this.store, {
+        accountId,
+        actor: 'api',
+        action: `domain.${updated.status}`,
+        target: id,
+        metadata: { domain: domain.domain, warnings },
+      });
+    }
+    return updated;
   }
 
   private async check(record: DnsRecord): Promise<boolean> {

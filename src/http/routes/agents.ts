@@ -183,6 +183,7 @@ export function registerAgentRoutes(router: Router): void {
         inReplyTo: original.rfcMessageId,
       },
       agent,
+      { domainId: ctx.auth.key.domainId },
     );
     return { status: 202, body: messageJson(result.message, { includeBody: false }) };
   });

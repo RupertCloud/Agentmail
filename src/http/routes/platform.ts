@@ -1,7 +1,7 @@
 import { requireFull, requireRead } from '../../domain/accounts.js';
 import { ListService } from '../../domain/lists.js';
 import { badRequest, notFound } from '../../errors.js';
-import type { KeyScope, MessageEventType, SuppressionReason } from '../../types.js';
+import type { KeyScope, MessageEventType, Suppression, SuppressionReason } from '../../types.js';
 import {
   optionalBoolean,
   optionalNumber,
@@ -83,8 +83,36 @@ export function registerPlatformRoutes(router: Router): void {
 
   router.get('/v1/suppressions', async (ctx) => {
     requireRead(ctx.auth);
-    const entries = await ctx.platform.suppression.list(ctx.auth.account.id);
+    const entries = filterSuppressions(
+      await ctx.platform.suppression.list(ctx.auth.account.id),
+      ctx.query,
+    );
     return { status: 200, body: { data: entries.map(suppressionJson) } };
+  });
+
+  router.get('/v1/suppressions/export', async (ctx) => {
+    requireRead(ctx.auth);
+    const entries = filterSuppressions(
+      await ctx.platform.suppression.list(ctx.auth.account.id),
+      ctx.query,
+    );
+    return {
+      status: 200,
+      headers: {
+        'content-type': 'text/csv; charset=utf-8',
+        'content-disposition': 'attachment; filename="suppressions.csv"',
+      },
+      body: toCsv(
+        ['email', 'reason', 'list_id', 'note', 'created_at'],
+        entries.map((entry) => [
+          entry.email,
+          entry.reason,
+          entry.listId ?? '',
+          entry.note ?? '',
+          entry.createdAt,
+        ]),
+      ),
+    };
   });
 
   router.post('/v1/suppressions', async (ctx) => {
@@ -187,6 +215,35 @@ export function registerPlatformRoutes(router: Router): void {
       ...((ctx.body.custom_fields as Record<string, unknown>) ?? {}),
     });
     return { status: 201, body: contactJson(contact) };
+  });
+
+  router.get('/v1/lists/:id/export', async (ctx) => {
+    requireRead(ctx.auth);
+    const list = await ctx.platform.lists.get(ctx.auth.account.id, ctx.params.id);
+    const contacts = await ctx.platform.lists.contacts(ctx.auth.account.id, ctx.params.id);
+    const customColumns = [
+      ...new Set(contacts.flatMap((contact) => Object.keys(contact.customFields))),
+    ].sort();
+    const rows = contacts.map((contact) => [
+      contact.email,
+      contact.name ?? '',
+      contact.status,
+      contact.source,
+      contact.confirmedAt ?? '',
+      contact.createdAt,
+      ...customColumns.map((column) => contact.customFields[column] ?? ''),
+    ]);
+    return {
+      status: 200,
+      headers: {
+        'content-type': 'text/csv; charset=utf-8',
+        'content-disposition': `attachment; filename="${list.name.replace(/[^\w.-]+/g, '-')}.csv"`,
+      },
+      body: toCsv(
+        ['email', 'name', 'status', 'source', 'confirmed_at', 'created_at', ...customColumns],
+        rows,
+      ),
+    };
   });
 
   router.post('/v1/lists/:id/import', async (ctx) => {
@@ -296,6 +353,12 @@ export function registerPlatformRoutes(router: Router): void {
     };
   });
 
+  router.post('/v1/webhooks/:id/deliveries/:deliveryId/replay', async (ctx) => {
+    requireFull(ctx.auth);
+    await ctx.platform.webhooks.replay(ctx.auth.account.id, ctx.params.id, ctx.params.deliveryId);
+    return { status: 202, body: { replayed: ctx.params.deliveryId } };
+  });
+
   /* ------------------------------------------------------------ account */
 
   router.get('/v1/account/usage', async (ctx) => {
@@ -331,4 +394,23 @@ export function registerPlatformRoutes(router: Router): void {
     );
     return { status: 200, body: { data: entries } };
   });
+}
+
+function filterSuppressions(entries: Suppression[], query: URLSearchParams): Suppression[] {
+  const needle = query.get('q')?.toLowerCase().trim();
+  const reason = query.get('reason');
+  return entries.filter((entry) => {
+    if (reason && entry.reason !== reason) return false;
+    if (needle && !entry.email.includes(needle)) return false;
+    return true;
+  });
+}
+
+/** RFC 4180 quoting: a field containing a comma, quote or newline is quoted. */
+function toCsv(headers: string[], rows: Array<Array<unknown>>): string {
+  const escape = (value: unknown): string => {
+    const text = value == null ? '' : String(value);
+    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  return [headers.join(','), ...rows.map((row) => row.map(escape).join(','))].join('\r\n');
 }

@@ -211,6 +211,10 @@ export class MemoryStore implements Store {
         if (filter.since && m.createdAt < filter.since) return false;
         if (filter.until && m.createdAt > filter.until) return false;
         if (recipient && !m.to.some((a) => a.email === recipient)) return false;
+        if (filter.tagKey) {
+          if (!(filter.tagKey in m.tags)) return false;
+          if (filter.tagValue !== undefined && m.tags[filter.tagKey] !== filter.tagValue) return false;
+        }
         if (query) {
           const haystack = `${m.subject} ${m.text ?? ''} ${m.html ?? ''}`.toLowerCase();
           if (!haystack.includes(query)) return false;

@@ -4,6 +4,7 @@ import type { Store } from '../store/types.js';
 import type { Account, Agent, Id, InboxPolicy } from '../types.js';
 import { domainOf, isValidEmail } from '../util/email.js';
 import { newId, slugify } from '../util/ids.js';
+import { audit } from './audit.js';
 
 export interface CreateAgentInput {
   slug?: string;
@@ -68,7 +69,7 @@ export class AgentService {
       throw conflict(`The address ${address} is already in use.`);
     }
 
-    return this.store.createAgent({
+    const agent = await this.store.createAgent({
       id: newId('agt'),
       accountId: account.id,
       slug,
@@ -85,6 +86,14 @@ export class AgentService {
       maxThreadRate: input.maxThreadRate ?? this.config.defaultMaxThreadRate,
       createdAt: new Date().toISOString(),
     });
+    await audit(this.store, {
+      accountId: account.id,
+      actor: 'api',
+      action: 'agent.created',
+      target: agent.id,
+      metadata: { address: agent.address, inbox_policy: agent.inboxPolicy },
+    });
+    return agent;
   }
 
   async get(accountId: Id, agentId: Id): Promise<Agent> {
@@ -114,12 +123,27 @@ export class AgentService {
     ] as const) {
       if (patch[field] !== undefined) (allowed as Record<string, unknown>)[field] = patch[field];
     }
-    return this.store.updateAgent(agentId, allowed);
+    const updated = await this.store.updateAgent(agentId, allowed);
+    await audit(this.store, {
+      accountId,
+      actor: 'api',
+      action: 'agent.updated',
+      target: agentId,
+      metadata: { fields: Object.keys(allowed) },
+    });
+    return updated;
   }
 
   async remove(accountId: Id, agentId: Id): Promise<void> {
-    await this.get(accountId, agentId);
+    const agent = await this.get(accountId, agentId);
     await this.store.deleteAgent(agentId);
+    await audit(this.store, {
+      accountId,
+      actor: 'api',
+      action: 'agent.removed',
+      target: agentId,
+      metadata: { address: agent.address },
+    });
   }
 
   /** Resolves an address to a local agent mailbox, if one exists. */

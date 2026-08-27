@@ -29,7 +29,7 @@ Conventions:
 |---|---|---|---|
 | POST | `/v1/emails` | send | Send a message |
 | POST | `/v1/emails/batch` | send | Up to 100 messages in one call |
-| GET | `/v1/emails` | read | List and filter (`direction`, `status`, `kind`, `thread_id`, `to`, `q`, `since`, `until`, `limit`, `cursor`) |
+| GET | `/v1/emails` | read | List and filter (`direction`, `status`, `kind`, `thread_id`, `to`, `tag`, `q`, `since`, `until`, `limit`, `cursor`) |
 | GET | `/v1/emails/{id}` | read | One message with its full event history |
 
 `POST /v1/emails` body:
@@ -100,13 +100,16 @@ subdomain with no MX.
 | POST / GET | `/v1/api-keys` | full |
 | DELETE | `/v1/api-keys/{id}` | full |
 | GET / POST | `/v1/suppressions` | read / full |
+| GET | `/v1/suppressions/export` | read |
 | DELETE | `/v1/suppressions/{id}` | full |
 | POST / GET | `/v1/templates` | full / read |
 | PATCH / DELETE | `/v1/templates/{id}` | full |
 | POST | `/v1/templates/{id}/preview` | read |
 
-Complaint and hard-bounce suppressions cannot be deleted. Template syntax:
-`{{path.to.value}}` is HTML-escaped, `{{{path.to.value}}}` is raw.
+Complaint and hard-bounce suppressions cannot be deleted. `GET
+/v1/suppressions` and its export accept `q` (address substring) and `reason`.
+A key created with `domain_id` may only send from that domain. Template
+syntax: `{{path.to.value}}` is HTML-escaped, `{{{path.to.value}}}` is raw.
 
 ## Lists and campaigns
 
@@ -116,6 +119,7 @@ Complaint and hard-bounce suppressions cannot be deleted. Template syntax:
 | DELETE | `/v1/lists/{id}` | full |
 | GET / POST | `/v1/lists/{id}/contacts` | read / full |
 | POST | `/v1/lists/{id}/import` | full |
+| GET | `/v1/lists/{id}/export` | read |
 | POST / GET | `/v1/campaigns` | full / read |
 | GET | `/v1/campaigns/{id}` | read |
 | POST | `/v1/campaigns/{id}/send` | full |
@@ -124,7 +128,8 @@ Complaint and hard-bounce suppressions cannot be deleted. Template syntax:
 | GET | `/v1/campaigns/{id}/stats` | read |
 
 `import` takes `csv` (with a header row) or `contacts`, and reports
-`imported`, `duplicates` and `rejected` rows with reasons. `GET
+`imported`, `duplicates` and `rejected` rows with reasons. `export` returns
+RFC 4180 CSV including every custom field column. `GET
 /v1/campaigns/{id}` includes `recipient_count` after suppression and
 unsubscribe exclusions.
 
@@ -135,11 +140,16 @@ unsubscribe exclusions.
 | POST / GET | `/v1/webhooks` | full |
 | DELETE | `/v1/webhooks/{id}` | full |
 | GET | `/v1/webhooks/{id}/deliveries` | full |
+| POST | `/v1/webhooks/{id}/deliveries/{delivery_id}/replay` | full |
 
 The endpoint secret is returned once, on creation. Each delivery carries
 `agentmail-signature: t=<unix>,v1=<hex>` where the HMAC-SHA256 covers
 `"<t>.<body>"`. Verify with a constant-time comparison and reject timestamps
-more than five minutes old. Failed deliveries retry with exponential backoff.
+more than five minutes old. Failed deliveries retry with exponential backoff across more than 24 hours,
+and any past delivery can be replayed unchanged.
+
+Filter the message log by tag with `?tag=order` (any value) or
+`?tag=order:4711` (exact).
 
 ## Account
 

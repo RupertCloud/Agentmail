@@ -39,6 +39,14 @@ export function toSendInput(body: Record<string, unknown>): SendEmailInput {
   };
 }
 
+/** `?tag=order` matches any message carrying the tag; `?tag=order:4711` pins the value. */
+function parseTagFilter(raw: string | null): { tagKey?: string; tagValue?: string } {
+  if (!raw) return {};
+  const separator = raw.indexOf(':');
+  if (separator === -1) return { tagKey: raw };
+  return { tagKey: raw.slice(0, separator), tagValue: raw.slice(separator + 1) };
+}
+
 export function registerEmailRoutes(router: Router): void {
   router.post('/v1/emails', async (ctx) => {
     requireSend(ctx.auth);
@@ -46,7 +54,9 @@ export function registerEmailRoutes(router: Router): void {
     const idempotencyKey = ctx.headers['idempotency-key'];
     if (typeof idempotencyKey === 'string') input.idempotencyKey = idempotencyKey;
 
-    const result = await ctx.platform.sending.send(ctx.auth.account, input, ctx.auth.agent);
+    const result = await ctx.platform.sending.send(ctx.auth.account, input, ctx.auth.agent, {
+      domainId: ctx.auth.key.domainId,
+    });
     return {
       status: 202,
       body: {
@@ -69,6 +79,7 @@ export function registerEmailRoutes(router: Router): void {
         ctx.auth.account,
         toSendInput(item as Record<string, unknown>),
         ctx.auth.agent,
+        { domainId: ctx.auth.key.domainId },
       );
       results.push(messageJson(result.message, { includeBody: false }));
     }
@@ -86,6 +97,7 @@ export function registerEmailRoutes(router: Router): void {
       threadId: ctx.query.get('thread_id') ?? undefined,
       recipient: ctx.query.get('to') ?? undefined,
       query: ctx.query.get('q') ?? undefined,
+      ...parseTagFilter(ctx.query.get('tag')),
       since: ctx.query.get('since') ?? undefined,
       until: ctx.query.get('until') ?? undefined,
       limit: optionalNumber({ limit: Number(ctx.query.get('limit') ?? 50) }, 'limit'),

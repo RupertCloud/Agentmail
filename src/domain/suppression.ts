@@ -2,6 +2,7 @@ import { forbidden, notFound } from '../errors.js';
 import type { Store } from '../store/types.js';
 import type { Id, Suppression, SuppressionReason } from '../types.js';
 import { newId } from '../util/ids.js';
+import { audit } from './audit.js';
 
 /** Complaint suppressions are permanent and cannot be lifted (FR-7.6). */
 const IRREVERSIBLE: SuppressionReason[] = ['complaint', 'hard_bounce'];
@@ -42,5 +43,12 @@ export class SuppressionService {
       throw forbidden(`A ${entry.reason} suppression cannot be removed.`);
     }
     await this.store.deleteSuppression(id);
+    await audit(this.store, {
+      accountId,
+      actor: 'api',
+      action: 'suppression.removed',
+      target: id,
+      metadata: { email: entry.email, reason: entry.reason },
+    });
   }
 }

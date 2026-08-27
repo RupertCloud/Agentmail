@@ -18,6 +18,8 @@ HTTP or MCP without touching DNS.
 
 The design is specified in [`SRS-silk-relay.md`](SRS-silk-relay.md) and
 [Amendment A — Agent Mailboxes](docs/SRS-amendment-a-agents.md).
+[`docs/srs-traceability.md`](docs/srs-traceability.md) states where every one of
+the 157 requirements actually stands.
 
 ---
 
@@ -197,7 +199,10 @@ signs unsubscribe links and authenticates the inbound ingest endpoint.
 
 ## Status
 
-Implemented and tested (36 tests, `npm test`):
+Implemented and tested (41 tests, `npm test`). Requirement by requirement, with
+the partial ones named, in
+[`docs/srs-traceability.md`](docs/srs-traceability.md) — 91 done, 26 partial,
+40 open.
 
 - Accounts, hashed API keys with `full` / `send` / `read` / `agent` scopes
 - Domain verification with DNS record generation and the DMARC / SPF /
@@ -207,8 +212,10 @@ Implemented and tested (36 tests, `npm test`):
 - Internal agent-to-agent routing and external delivery via a provider port
 - Priority queues, retries with backoff, dead letter queue
 - Suppression with bounce and complaint handling
-- Templates, lists with CSV import, campaigns with one-click unsubscribe
-- Signed webhooks with retry and replay
+- Templates, lists with CSV import and export, campaigns with one-click unsubscribe
+- Signed webhooks with a 24-hour retry window and manual replay
+- Message log filterable by recipient, status, thread, tag, text and date
+- Audit trail over account, key, domain, agent, suppression and webhook actions
 - REST API, MCP server, SDK
 
 Not yet built, and the honest list:

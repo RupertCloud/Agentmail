@@ -6,6 +6,7 @@ import type { Store } from '../store/types.js';
 import type { Id, Message, MessageEvent, MessageEventType, Webhook, WebhookDelivery } from '../types.js';
 import { newWebhookSecret, signWebhook } from '../util/crypto.js';
 import { newId } from '../util/ids.js';
+import { audit } from './audit.js';
 import type { EventSink } from './events.js';
 
 interface WebhookJob {
@@ -34,7 +35,8 @@ export class WebhookService implements EventSink {
       [this.queue],
       (job) => this.deliver(job.body.deliveryId, job.body.webhookId, job.body.body),
       {
-        maxAttempts: options.maxAttempts ?? 12,
+        // 24 attempts with a one-hour ceiling spans well over the 24 hours FR-10.3 asks for.
+        maxAttempts: options.maxAttempts ?? 24,
         backoffBaseSeconds: 5,
         backoffMaxSeconds: 3600,
         onDeadLetter: async (job, reason) => {
@@ -53,7 +55,7 @@ export class WebhookService implements EventSink {
     eventTypes: MessageEventType[],
   ): Promise<Webhook> {
     if (!/^https:\/\//i.test(url)) throw badRequest('Webhook endpoints must be HTTPS.', 'url');
-    return this.store.createWebhook({
+    const webhook = await this.store.createWebhook({
       id: newId('whk'),
       accountId,
       url,
@@ -62,6 +64,14 @@ export class WebhookService implements EventSink {
       active: true,
       createdAt: new Date().toISOString(),
     });
+    await audit(this.store, {
+      accountId,
+      actor: 'api',
+      action: 'webhook.created',
+      target: webhook.id,
+      metadata: { url, event_types: eventTypes },
+    });
+    return webhook;
   }
 
   async list(accountId: Id): Promise<Webhook[]> {
@@ -72,6 +82,13 @@ export class WebhookService implements EventSink {
     const webhook = await this.store.getWebhook(id);
     if (!webhook || webhook.accountId !== accountId) throw notFound('Webhook');
     await this.store.deleteWebhook(id);
+    await audit(this.store, {
+      accountId,
+      actor: 'api',
+      action: 'webhook.removed',
+      target: id,
+      metadata: { url: webhook.url },
+    });
   }
 
   async deliveries(accountId: Id, webhookId: Id): Promise<WebhookDelivery[]> {

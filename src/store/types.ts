@@ -40,6 +40,9 @@ export interface MessageFilter {
   recipient?: string;
   /** Free-text match against subject and body. */
   query?: string;
+  /** Matches a message tag: key alone, or key and exact value. */
+  tagKey?: string;
+  tagValue?: string;
   since?: Timestamp;
   until?: Timestamp;
   limit?: number;

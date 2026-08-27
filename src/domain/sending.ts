@@ -81,7 +81,13 @@ export class SendService {
     private readonly queues: { transactional: Queue<DeliveryJob>; campaign: Queue<DeliveryJob> },
   ) {}
 
-  async send(account: Account, input: SendEmailInput, sender: Agent | null = null): Promise<SendResult> {
+  async send(
+    account: Account,
+    input: SendEmailInput,
+    sender: Agent | null = null,
+    /** Restrictions carried by the calling credential, e.g. a domain-scoped key. */
+    constraints: { domainId?: Id | null } = {},
+  ): Promise<SendResult> {
     if (input.idempotencyKey) {
       const existing = await this.store.findByIdempotencyKey(account.id, input.idempotencyKey);
       if (existing) return { message: existing, internal: [], skipped: [] };
@@ -90,6 +96,8 @@ export class SendService {
     const agent = await this.resolveSendingAgent(account, input, sender);
     const from = this.resolveFrom(input, agent);
     await this.assertSenderAllowed(account, from, agent);
+    await this.assertKeyDomain(account, from, constraints.domainId ?? null);
+    this.assertSchedule(input.scheduledAt);
 
     const to = parseAddressList(input.to as string | string[]);
     const cc = parseAddressList(input.cc as string | string[]);
@@ -242,6 +250,30 @@ export class SendService {
     if (!verified) throw forbidden(`Domain ${domain} is not registered on this account.`);
     if (verified.status !== 'verified') {
       throw forbidden(`Domain ${domain} is not verified yet, so it cannot send (FR-2.5).`);
+    }
+  }
+
+  /** FR-3.5: a key scoped to a domain may not send from any other. */
+  private async assertKeyDomain(account: Account, from: Address, domainId: Id | null): Promise<void> {
+    if (!domainId) return;
+    const domain = await this.store.getDomain(domainId);
+    if (!domain || domain.accountId !== account.id) {
+      throw forbidden('This key is scoped to a domain that no longer exists.');
+    }
+    if (domainOf(from.email) !== domain.domain) {
+      throw forbidden(`This key may only send from ${domain.domain}.`);
+    }
+  }
+
+  /** FR-4.6: scheduling reaches 30 days ahead, and no further. */
+  private assertSchedule(scheduledAt: string | undefined): void {
+    if (!scheduledAt) return;
+    const when = Date.parse(scheduledAt);
+    if (!Number.isFinite(when)) {
+      throw badRequest('`scheduled_at` must be an ISO 8601 timestamp.', 'scheduled_at');
+    }
+    if (when - Date.now() > 30 * 24 * 60 * 60 * 1000) {
+      throw badRequest('`scheduled_at` may be at most 30 days ahead.', 'scheduled_at');
     }
   }
 

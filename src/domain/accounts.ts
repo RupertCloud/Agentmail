@@ -4,6 +4,7 @@ import type { Store } from '../store/types.js';
 import type { Account, Agent, ApiKey, Id, KeyScope, Role, User } from '../types.js';
 import { generateApiKey, verifyApiKey } from '../util/crypto.js';
 import { newId, slugify } from '../util/ids.js';
+import { audit } from './audit.js';
 
 export interface AuthContext {
   account: Account;
@@ -104,11 +105,26 @@ export class AccountService {
       revokedAt: null,
       createdAt: new Date().toISOString(),
     });
+    await audit(this.store, {
+      accountId,
+      actor: 'api',
+      action: 'api_key.created',
+      target: key.id,
+      metadata: { scope, name, agent_id: options.agentId ?? null, domain_id: options.domainId ?? null },
+    });
     return { key, secret: generated.secret };
   }
 
   async revokeApiKey(id: Id): Promise<ApiKey> {
-    return this.store.updateApiKey(id, { revokedAt: new Date().toISOString() });
+    const key = await this.store.updateApiKey(id, { revokedAt: new Date().toISOString() });
+    await audit(this.store, {
+      accountId: key.accountId,
+      actor: 'api',
+      action: 'api_key.revoked',
+      target: key.id,
+      metadata: { name: key.name },
+    });
+    return key;
   }
 
   /** Resolves a bearer token to an account, key and (for agent keys) an agent. */
