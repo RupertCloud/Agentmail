@@ -14,6 +14,7 @@ import { SuppressionService } from './domain/suppression.js';
 import { TemplateService } from './domain/templates.js';
 import { WebhookService, type Fetcher } from './domain/webhooks.js';
 import { InboundService } from './inbound/ingest.js';
+import { AwsControlPlane, LocalControlPlane, type SesControlPlane } from './providers/control-plane.js';
 import { MemoryProvider } from './providers/memory.js';
 import { SesProvider } from './providers/ses.js';
 import type { EmailProvider } from './providers/types.js';
@@ -26,6 +27,7 @@ export interface PlatformOptions {
   config?: Partial<Config>;
   store?: Store;
   provider?: EmailProvider;
+  controlPlane?: SesControlPlane;
   dns?: DnsResolver;
   fetcher?: Fetcher;
 }
@@ -39,6 +41,7 @@ export class Platform {
   readonly config: Config;
   readonly store: Store;
   readonly provider: EmailProvider;
+  readonly controlPlane: SesControlPlane;
 
   readonly notifier: MailboxNotifier;
   readonly events: EventService;
@@ -66,15 +69,25 @@ export class Platform {
     this.provider =
       options.provider ??
       (this.config.provider === 'ses' ? new SesProvider(this.config.awsRegion) : new MemoryProvider());
+    this.controlPlane =
+      options.controlPlane ??
+      (this.config.provider === 'ses'
+        ? new AwsControlPlane(this.config.awsRegion, this.config.awsAccountId)
+        : new LocalControlPlane(this.config.platformDomain));
 
     this.notifier = new MailboxNotifier();
     this.events = new EventService(this.store);
     this.webhooks = new WebhookService(this.store, { fetcher: options.fetcher });
     this.events.addSink(this.webhooks);
 
-    this.accounts = new AccountService(this.store, this.config);
+    this.accounts = new AccountService(this.store, this.config, this.controlPlane);
     this.agents = new AgentService(this.store, this.config);
-    this.domains = new DomainService(this.store, this.config, options.dns ?? new SystemDnsResolver());
+    this.domains = new DomainService(
+      this.store,
+      this.config,
+      options.dns ?? new SystemDnsResolver(),
+      this.controlPlane,
+    );
     this.suppression = new SuppressionService(this.store);
     this.templates = new TemplateService(this.store);
     this.lists = new ListService(this.store);

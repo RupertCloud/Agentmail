@@ -186,6 +186,7 @@ docs/                amendment, API reference, agent guide
 | `DATABASE_URL` | — | Postgres connection string |
 | `AGENTMAIL_PROVIDER` | `memory` | `memory` or `ses` |
 | `AWS_REGION` | `eu-west-1` | SES region |
+| `AWS_ACCOUNT_ID` | — | Required with `ses`; tenant association builds ARNs from it |
 | `AGENTMAIL_SECRET` | development value | HMAC secret for unsubscribe tokens and ingest auth |
 | `AGENTMAIL_MAX_HOPS` | `10` | Default automated-reply ceiling |
 | `AGENTMAIL_MAX_THREAD_RATE` | `30` | Default per-thread messages per minute |
@@ -194,6 +195,9 @@ docs/                amendment, API reference, agent guide
 
 Set `AGENTMAIL_SECRET` to a real value before running anywhere but a laptop: it
 signs unsubscribe links and authenticates the inbound ingest endpoint.
+[`.env.example`](.env.example) has the full set, and
+[`docs/ses-setup.md`](docs/ses-setup.md) covers credentials, the IAM policy,
+what AWS provisions automatically and what the customer pastes into DNS.
 
 ---
 
@@ -227,8 +231,11 @@ Not yet built, and the honest list:
 - **SQS queues.** The queue port is SQS-shaped; the implementation is
   in-process, so a restart drops queued work.
 - **The SES receipt path.** `/ingest/inbound` takes the raw message and
-  envelope recipients; the SES receipt rule, S3 landing and SNS wiring that
-  would call it are not in this repository.
+  envelope recipients; the SES receipt rule, S3 landing and the Lambda that
+  would call it are not in this repository. Nor is the SNS adapter for
+  `/ingest/events`. Outbound provisioning and sending *are* wired — see
+  [`docs/ses-setup.md`](docs/ses-setup.md) — but have not been run against a
+  live AWS account.
 - **Dashboard, billing, SMTP relay, open and click tracking, A/B testing.**
   Specified in the base SRS, not started.
 

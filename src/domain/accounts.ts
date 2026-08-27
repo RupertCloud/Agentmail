@@ -1,5 +1,6 @@
 import type { Config } from '../config.js';
 import { forbidden, unauthorized } from '../errors.js';
+import type { SesControlPlane } from '../providers/control-plane.js';
 import type { Store } from '../store/types.js';
 import type { Account, Agent, ApiKey, Id, KeyScope, Role, User } from '../types.js';
 import { generateApiKey, verifyApiKey } from '../util/crypto.js';
@@ -27,7 +28,11 @@ export interface CreatedKey {
 }
 
 export class AccountService {
-  constructor(private readonly store: Store, private readonly config: Config) {}
+  constructor(
+    private readonly store: Store,
+    private readonly config: Config,
+    private readonly ses: SesControlPlane,
+  ) {}
 
   async createAccount(input: CreateAccountInput): Promise<{ account: Account; owner: User | null }> {
     const slug = slugify(input.slug ?? input.name);
@@ -36,12 +41,17 @@ export class AccountService {
       throw forbidden(`The account slug "${slug}" is taken.`);
     }
 
+    // FR-1.3: the SES tenant is the isolation boundary, so it exists before the
+    // account does. A failure here must not leave an account that cannot send.
+    const tenantName = `t-${slug}`;
+    await this.ses.createTenant(tenantName);
+
     const now = new Date().toISOString();
     const account = await this.store.createAccount({
       id: newId('acct'),
       slug,
       name: input.name,
-      tenantName: `t-${slug}`,
+      tenantName,
       status: 'active',
       plan: input.plan ?? 'free',
       dailySendLimit: this.config.initialDailySendLimit,

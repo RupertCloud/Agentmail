@@ -24,5 +24,7 @@
     "@types/node": "^22.10.2",
     "typescript": "^5.9.3"
   },
-  "optionalDependencies": {}
+  "optionalDependencies": {
+    "@aws-sdk/client-sesv2": "^3.700.0"
+  }
 }

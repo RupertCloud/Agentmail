@@ -11,6 +11,8 @@ export interface Config {
   databaseUrl?: string;
   provider: 'memory' | 'ses';
   awsRegion: string;
+  /** AWS account id; SES does not return ARNs on create, so they are built. */
+  awsAccountId: string;
   /** Default automated-reply hop ceiling for new agents. */
   defaultMaxHops: number;
   /** Default per-thread ceiling in messages per minute for new agents. */
@@ -45,6 +47,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     databaseUrl: env.DATABASE_URL,
     provider: env.AGENTMAIL_PROVIDER === 'ses' ? 'ses' : 'memory',
     awsRegion: env.AWS_REGION ?? 'eu-west-1',
+    awsAccountId: env.AWS_ACCOUNT_ID ?? '000000000000',
     defaultMaxHops: int(env.AGENTMAIL_MAX_HOPS, 10),
     defaultMaxThreadRate: int(env.AGENTMAIL_MAX_THREAD_RATE, 30),
     leaseSeconds: int(env.AGENTMAIL_LEASE_SECONDS, 60),
