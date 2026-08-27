@@ -217,7 +217,10 @@ docs/                amendment, API reference, agent guide
 | `AGENTMAIL_INITIAL_DAILY_LIMIT` | `100` | Sending limit for a new account |
 
 Set `AGENTMAIL_SECRET` to a real value before running anywhere but a laptop: it
-signs unsubscribe links and authenticates the inbound ingest endpoint.
+signs unsubscribe links and authenticates the inbound ingest endpoints. Left
+unset, those endpoints fail closed with `503` rather than trust a default that
+is published in this repository, and `/health` says so.
+[`docs/deploy.md`](docs/deploy.md) covers deploying;
 [`.env.example`](.env.example) has the full set, and
 [`docs/ses-setup.md`](docs/ses-setup.md) covers credentials, the IAM policy,
 what AWS provisions automatically and what the customer pastes into DNS.

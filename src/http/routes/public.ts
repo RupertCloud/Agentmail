@@ -1,9 +1,21 @@
 import { timingSafeEqual } from 'node:crypto';
 import { verifyUnsubscribe } from '../../domain/unsubscribe.js';
-import { badRequest, forbidden } from '../../errors.js';
+import { ApiError, badRequest, forbidden } from '../../errors.js';
+import { ACCP_VERSION } from '../../util/mime.js';
 import type { RequestContext, Router } from '../router.js';
 
 function assertIngestSecret(ctx: RequestContext): void {
+  // Fail closed rather than accept a secret anyone can read in the repository.
+  // Injecting inbound mail into an arbitrary mailbox is not something to leave
+  // open because a deployment forgot an environment variable.
+  if (ctx.platform.config.secretIsDefault) {
+    throw new ApiError(
+      503,
+      'not_configured',
+      'Ingest is disabled because AGENTMAIL_SECRET is unset and the published default is in use. ' +
+        'Set AGENTMAIL_SECRET to enable it.',
+    );
+  }
   const provided = ctx.headers['x-agentmail-ingest-secret'];
   const expected = ctx.platform.config.secret;
   if (typeof provided !== 'string' || provided.length !== expected.length) {
@@ -15,6 +27,22 @@ function assertIngestSecret(ctx: RequestContext): void {
 }
 
 export function registerPublicRoutes(router: Router): void {
+  router.get('/', async (ctx) => ({
+    status: 200,
+    body: {
+      name: 'agentmail',
+      description: 'Email for AI agents, and the humans they work with.',
+      protocol: { name: 'ACCP', version: ACCP_VERSION, spec: 'docs/accp/SPEC.md' },
+      agent_domain: ctx.platform.config.agentDomain,
+      docs: {
+        api: 'docs/api.md',
+        agents: 'docs/agents.md',
+        protocol: 'docs/accp/SPEC.md',
+      },
+      endpoints: { health: '/health', api: '/v1' },
+    },
+  }), false);
+
   router.get('/health', async (ctx) => ({
     status: 200,
     body: {
@@ -28,6 +56,7 @@ export function registerPublicRoutes(router: Router): void {
       dead_letters:
         ctx.platform.queues.transactional.deadLetters().length +
         ctx.platform.queues.campaign.deadLetters().length,
+      warnings: deploymentWarnings(ctx),
     },
   }), false);
 
@@ -97,6 +126,22 @@ export function registerPublicRoutes(router: Router): void {
 
   router.get('/u/:token', unsubscribe, false);
   router.post('/u/:token', unsubscribe, false);
+}
+
+/** Surfaced on /health so a misconfigured deployment is visible, not guessed at. */
+function deploymentWarnings(ctx: RequestContext): string[] {
+  const warnings: string[] = [];
+  const config = ctx.platform.config;
+  if (config.secretIsDefault) {
+    warnings.push('AGENTMAIL_SECRET is unset; inbound and event ingest are disabled.');
+  }
+  if (config.store === 'memory') {
+    warnings.push('Store is in-memory: all accounts, mailboxes and messages are lost on restart.');
+  }
+  if (ctx.platform.provider.name === 'memory') {
+    warnings.push('Provider is in-memory: accepted messages are recorded but never sent.');
+  }
+  return warnings;
 }
 
 function escapeHtml(value: string): string {

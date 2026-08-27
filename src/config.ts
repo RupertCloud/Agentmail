@@ -25,9 +25,17 @@ export interface Config {
   initialDailySendLimit: number;
   /** Worker retry ceiling before a message lands in the dead letter queue. */
   maxSendAttempts: number;
-  /** HMAC secret for unsubscribe and tracking tokens. */
+  /** HMAC secret for unsubscribe tokens and ingest authentication. */
   secret: string;
+  /**
+   * True when no secret was configured and the published default is in use.
+   * The default is in the repository, so anything it guards is guarded by
+   * nothing at all.
+   */
+  secretIsDefault: boolean;
 }
+
+export const DEFAULT_SECRET = 'development-secret-do-not-use-in-production';
 
 function int(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
@@ -54,6 +62,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxWaitSeconds: int(env.AGENTMAIL_MAX_WAIT_SECONDS, 60),
     initialDailySendLimit: int(env.AGENTMAIL_INITIAL_DAILY_LIMIT, 100),
     maxSendAttempts: int(env.AGENTMAIL_MAX_SEND_ATTEMPTS, 5),
-    secret: env.AGENTMAIL_SECRET ?? 'development-secret-do-not-use-in-production',
+    secret: env.AGENTMAIL_SECRET ?? DEFAULT_SECRET,
+    // Derived from the value, not from whether the variable was set, so
+    // explicitly configuring the published default is caught too.
+    secretIsDefault: (env.AGENTMAIL_SECRET ?? DEFAULT_SECRET) === DEFAULT_SECRET,
   };
 }

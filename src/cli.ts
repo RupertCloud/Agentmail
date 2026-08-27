@@ -18,6 +18,9 @@ async function serve(seedDemo: boolean): Promise<void> {
         `  provider: ${platform.provider.name}\n` +
         `  agents:   *@<account>.${platform.config.agentDomain}\n`,
     );
+    for (const warning of startupWarnings(platform)) {
+      process.stderr.write(`  WARNING: ${warning}\n`);
+    }
   });
 
   const shutdown = () => {
@@ -27,6 +30,24 @@ async function serve(seedDemo: boolean): Promise<void> {
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+}
+
+/** Configuration that is fine on a laptop and wrong anywhere else. */
+function startupWarnings(platform: Platform): string[] {
+  const warnings: string[] = [];
+  if (platform.config.secretIsDefault) {
+    warnings.push(
+      'AGENTMAIL_SECRET is unset, so the published default is in use. Inbound and event ' +
+        'ingest are disabled until you set it. Generate one with: openssl rand -base64 32',
+    );
+  }
+  if (platform.config.store === 'memory') {
+    warnings.push('Store is in-memory. Every account, mailbox and message is lost on restart.');
+  }
+  if (platform.provider.name === 'memory') {
+    warnings.push('Provider is in-memory. Accepted messages are recorded and never sent.');
+  }
+  return warnings;
 }
 
 /** Seeds an account with two agents that can talk to each other immediately. */

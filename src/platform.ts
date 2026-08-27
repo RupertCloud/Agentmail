@@ -1,4 +1,4 @@
-import { loadConfig, type Config } from './config.js';
+import { DEFAULT_SECRET, loadConfig, type Config } from './config.js';
 import { AccountService } from './domain/accounts.js';
 import { AgentService } from './domain/agents.js';
 import { CampaignService } from './domain/campaigns.js';
@@ -64,7 +64,11 @@ export class Platform {
   private leaseSweeper: NodeJS.Timeout | null = null;
 
   constructor(options: PlatformOptions = {}) {
-    this.config = { ...loadConfig(), ...options.config };
+    const config = { ...loadConfig(), ...options.config };
+    // Recomputed after the merge: a caller supplying a secret directly must not
+    // inherit the environment's verdict on whether one was configured.
+    config.secretIsDefault = config.secret === DEFAULT_SECRET;
+    this.config = config;
     this.store = options.store ?? new MemoryStore();
     this.provider =
       options.provider ??

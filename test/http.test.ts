@@ -449,3 +449,62 @@ test('the message log filters by tag and records administrative actions', async 
     assert.ok(actions.includes(expected), `audit log is missing ${expected}`);
   }
 });
+
+test('ingest fails closed when AGENTMAIL_SECRET is unset', async (t) => {
+  // Reproduce a deployment that never set the variable, by leaving the
+  // published default in place.
+  const { platform } = newHarness({ secret: 'development-secret-do-not-use-in-production' });
+  const server = await startServer(platform);
+  t.after(async () => {
+    await server.close();
+    await platform.close();
+  });
+
+  // Even presenting the published default must not get through.
+  const response = await fetch(`${server.baseUrl}/ingest/inbound`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-agentmail-ingest-secret': 'development-secret-do-not-use-in-production',
+    },
+    body: JSON.stringify({ raw: 'x', recipients: ['a@b.test'] }),
+  });
+  assert.equal(response.status, 503);
+  const body = (await response.json()) as any;
+  assert.match(body.error.message, /AGENTMAIL_SECRET/);
+
+  const health = await (await fetch(`${server.baseUrl}/health`)).json() as any;
+  assert.ok(health.warnings.some((w: string) => /AGENTMAIL_SECRET/.test(w)));
+});
+
+test('the root path describes the service', async (t) => {
+  const { platform } = newHarness();
+  const server = await startServer(platform);
+  t.after(async () => {
+    await server.close();
+    await platform.close();
+  });
+
+  const response = await fetch(`${server.baseUrl}/`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as any;
+  assert.equal(body.name, 'agentmail');
+  assert.equal(body.protocol.name, 'ACCP');
+  assert.equal(body.agent_domain, 'agents.agentmail.test');
+});
+
+test('health reports what is misconfigured rather than only "ok"', async (t) => {
+  const { platform } = newHarness();
+  const server = await startServer(platform);
+  t.after(async () => {
+    await server.close();
+    await platform.close();
+  });
+
+  const health = (await (await fetch(`${server.baseUrl}/health`)).json()) as any;
+  assert.equal(health.status, 'ok');
+  assert.ok(
+    health.warnings.some((w: string) => /in-memory/.test(w)),
+    'a non-durable store must be visible on the health endpoint',
+  );
+});

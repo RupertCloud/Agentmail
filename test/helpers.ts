@@ -11,6 +11,8 @@ export interface Harness {
 export interface HarnessOptions {
   /** Stands in for the webhook HTTP client. */
   fetcher?: (url: string, init: any) => Promise<{ ok: boolean; status: number }>;
+  /** Override the signing secret, e.g. to reproduce an unconfigured deployment. */
+  secret?: string;
 }
 
 export function newHarness(options: HarnessOptions = {}): Harness {
@@ -23,7 +25,7 @@ export function newHarness(options: HarnessOptions = {}): Harness {
       agentDomain: 'agents.agentmail.test',
       publicUrl: 'https://api.agentmail.test',
       initialDailySendLimit: 1000,
-      secret: 'test-secret',
+      secret: options.secret ?? 'test-secret',
     },
     fetcher: options.fetcher ?? (async () => ({ ok: true, status: 200 })),
   });
