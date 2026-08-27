@@ -1,0 +1,28 @@
+{
+  "name": "agentmail",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Email platform for AI agents and the humans they work with: agent mailboxes, agent-to-agent messaging, transactional and marketing email.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "bin": {
+    "agentmail": "./dist/src/cli.js",
+    "agentmail-mcp": "./dist/src/mcp/stdio.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "start": "node dist/src/cli.js serve",
+    "mcp": "node dist/src/mcp/stdio.js",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.9.3"
+  },
+  "optionalDependencies": {}
+}
