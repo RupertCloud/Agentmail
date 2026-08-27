@@ -9,11 +9,32 @@ import { randomBytes } from 'node:crypto';
 import type { Address, Attachment } from '../types.js';
 import { formatAddressList, parseAddressList } from './email.js';
 
-export const STRUCTURED_PART_NAME = 'agentmail.json';
-export const HEADER_PAYLOAD = 'X-AgentMail-Payload';
-export const HEADER_HOPS = 'X-AgentMail-Hops';
-export const HEADER_AGENT = 'X-AgentMail-Agent';
-export const HEADER_THREAD = 'X-AgentMail-Thread';
+/* ACCP wire constants — see docs/accp/SPEC.md. Header names carry no `X-`
+ * prefix, per RFC 6648. */
+export const ACCP_VERSION = '0.1';
+export const STRUCTURED_PART_NAME = 'accp.json';
+export const STRUCTURED_MEDIA_TYPE = 'application/accp+json';
+
+export const HEADER_VERSION = 'ACCP-Version';
+export const HEADER_INTENT = 'ACCP-Intent';
+export const HEADER_CONVERSATION = 'ACCP-Conversation';
+export const HEADER_HOPS = 'ACCP-Hops';
+export const HEADER_AGENT = 'ACCP-Agent';
+export const HEADER_CAPABILITY = 'ACCP-Capability';
+export const HEADER_CORRELATION = 'ACCP-Correlation';
+export const HEADER_IDEMPOTENCY = 'ACCP-Idempotency-Key';
+export const HEADER_EXPIRES = 'ACCP-Expires';
+
+/**
+ * Pre-standard header and part names this implementation emitted before ACCP
+ * was specified. Accepted on the way in, never written on the way out.
+ */
+export const LEGACY_HEADERS: Record<string, string> = {
+  'x-agentmail-hops': HEADER_HOPS,
+  'x-agentmail-agent': HEADER_AGENT,
+  'x-agentmail-thread': HEADER_CONVERSATION,
+};
+export const LEGACY_PART_NAME = 'agentmail.json';
 
 export interface RawMessageInput {
   from: Address;
@@ -121,7 +142,7 @@ export function buildRawMessage(input: RawMessageInput): string {
   const mixedParts: string[] = [];
   if (input.structured !== undefined) {
     mixedParts.push(
-      part('application/json; charset=UTF-8', JSON.stringify(input.structured, null, 2), [
+      part(`${STRUCTURED_MEDIA_TYPE}; charset=UTF-8`, JSON.stringify(input.structured, null, 2), [
         `Content-Disposition: inline; filename="${STRUCTURED_PART_NAME}"`,
       ]),
     );
@@ -215,6 +236,10 @@ function parseHeaders(block: string): Record<string, string> {
     const value = line.slice(idx + 1).trim();
     headers[name] = name in headers ? `${headers[name]}, ${value}` : value;
   }
+  for (const [legacy, standard] of Object.entries(LEGACY_HEADERS)) {
+    const canonical = standard.toLowerCase();
+    if (legacy in headers && !(canonical in headers)) headers[canonical] = headers[legacy];
+  }
   return headers;
 }
 
@@ -238,7 +263,11 @@ function walkPart(headers: Record<string, string>, body: string, out: ParsedMess
   const filename = (disposition.match(/filename="?([^";]+)"?/i) ?? [])[1];
   const decoded = decodeBody(body, headers['content-transfer-encoding']);
 
-  if (mediaType === 'application/json' && filename === STRUCTURED_PART_NAME) {
+  const isStructured =
+    mediaType === STRUCTURED_MEDIA_TYPE ||
+    (mediaType === 'application/json' &&
+      (filename === STRUCTURED_PART_NAME || filename === LEGACY_PART_NAME));
+  if (isStructured) {
     try {
       out.structured = JSON.parse(decoded.toString('utf8'));
     } catch {

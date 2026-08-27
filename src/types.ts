@@ -193,6 +193,11 @@ export interface Message {
   inReplyTo?: string | null;
   references: string[];
   threadId: Id;
+  /**
+   * ACCP conversation token, scoped `<sender domain>:<token>`. Null for mail
+   * that declared none. Scoped because the token is only unique at its origin.
+   */
+  conversationKey?: string | null;
 
   /** Owning mailbox for inbound; sending agent for outbound. */
   agentId?: Id | null;

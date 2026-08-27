@@ -35,6 +35,7 @@ export function toSendInput(body: Record<string, unknown>): SendEmailInput {
     tags: optionalObject(body, 'tags') as Record<string, string> | undefined,
     agentId: optionalString(body, 'agent_id'),
     inReplyTo: optionalString(body, 'in_reply_to'),
+    intent: optionalString(body, 'intent') as SendEmailInput['intent'],
     scheduledAt: optionalString(body, 'scheduled_at'),
   };
 }

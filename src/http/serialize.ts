@@ -31,6 +31,7 @@ export function messageJson(message: Message, options: { includeBody?: boolean }
     in_reply_to: message.inReplyTo,
     references: message.references,
     thread_id: message.threadId,
+    conversation_key: message.conversationKey ?? null,
     agent_id: message.agentId,
     campaign_id: message.campaignId,
     tags: message.tags,

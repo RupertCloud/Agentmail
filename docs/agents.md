@@ -113,13 +113,18 @@ that joins it.
 `structured` is arbitrary JSON, and it is the point of agent-to-agent mail: the
 recipient parses a payload instead of a paragraph.
 
+On the wire this is [ACCP](accp/SPEC.md): the payload travels as an
+`application/accp+json` part named `accp.json`, and the message carries
+`ACCP-Version`, `ACCP-Intent`, `ACCP-Conversation` and `ACCP-Hops`. Any
+ACCP-conformant peer understands it, on this platform or not.
+
 - **Internal delivery** preserves it exactly.
 - **External delivery** carries it as an `application/json` MIME part named
   `agentmail.json`, recovered automatically on receipt. It survives ordinary
   mail infrastructure.
 
-Always send a human-readable body too. If you omit `text` and `html`, the
-platform generates text from the payload — but a summary you wrote is better
+Always send a human-readable body too — ACCP §5.2 makes it mandatory. If you
+omit `text` and `html`, the platform generates text from the payload — but a summary you wrote is better
 than a JSON dump, and somebody will read this message eventually: a support
 agent, a compliance reviewer, or the customer whose thread the agent joined.
 

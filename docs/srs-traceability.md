@@ -8,8 +8,12 @@ repository. 116 requirements in the base document, 41 in the amendment.
 **Partial** — the useful part works; the note says what is missing.
 **Open** — not started.
 
-Counts: **91 done · 26 partial · 40 open** across all 157.
-The base document alone: 52 done, 24 partial, 40 open.
+Counts: **96 done · 21 partial · 40 open** across all 157.
+The base document alone: 57 done, 19 partial, 40 open.
+
+The wire format is additionally specified, vendor-neutrally, as
+[ACCP](accp/SPEC.md); the implementation conforms to Core, Mailbox and
+Directory.
 
 The concentration of Open rows is not accidental. Everything requiring the AWS
 control plane (SES identity provisioning, tenant creation, EventBridge), a
@@ -25,7 +29,7 @@ half-built control is more dangerous than a missing one.
 |---|---|---|
 | FR-1.1 | Open | No sign-up flow; accounts are created through the service API. Dashboard auth is out of scope here. |
 | FR-1.2 | Open | No email verification gate. Domain verification (FR-2.5) is enforced instead, which is the control that protects deliverability. |
-| FR-1.3 | Partial | Each account gets a tenant name at creation and every send is scoped to it. The SES `CreateTenant` call is not made — no AWS control plane in this repo. |
+| FR-1.3 | Done | Account creation calls `CreateTenant` and every send is scoped to it. Not exercised against a live AWS account. |
 | FR-1.4 | Partial | `users` carries the four roles; nothing enforces them, because every caller here authenticates with an API key rather than as a user. |
 | FR-1.5 | Open | No invite flow. |
 
@@ -34,11 +38,11 @@ half-built control is more dangerous than a missing one.
 | Req | State | Note |
 |---|---|---|
 | FR-2.1 | Done | Three DKIM CNAMEs, MAIL FROM MX and TXT, and an SPF value, returned on `POST /v1/domains`. |
-| FR-2.2 | Partial | Records are generated and the MAIL FROM subdomain is chosen; the SES identity, Easy DKIM and tenant association are not created. |
-| FR-2.3 | Partial | `POST /v1/domains/{id}/verify` re-checks DNS and reports per-record status. Polling is on demand, not a background loop. |
+| FR-2.2 | Done | Creates the configuration set, the identity with Easy DKIM at 2048 bits, the custom MAIL FROM, and both tenant associations. The DKIM tokens published are the ones SES returned. |
+| FR-2.3 | Partial | Verification requires DNS to resolve *and* SES to report the identity verified, and says so when they disagree. Polling is on demand, not a background loop. |
 | FR-2.4 | Done | Strict DMARC with nothing aligned, multiple SPF records, and a MAIL FROM without MX are all detected and explained. |
 | FR-2.5 | Done | Sending from an unverified domain is refused. |
-| FR-2.6 | Partial | The record is removed; the SES-side disassociation is not made. |
+| FR-2.6 | Done | The SES identity is deleted before the record is forgotten. |
 
 ## 4.3 API keys
 
@@ -202,8 +206,8 @@ are documented there but not automated.
 
 | Req | State | Note |
 |---|---|---|
-| DR-1 | Partial | 2048-bit DKIM records are issued; SES is not configured to sign. |
-| DR-2 | Partial | The custom MAIL FROM subdomain and its records are issued; SES is not configured. |
+| DR-1 | Done | `NextSigningKeyLength: RSA_2048_BIT` on identity creation. |
+| DR-2 | Done | Custom MAIL FROM set with `BehaviorOnMxFailure: REJECT_MESSAGE`, so a broken MX fails loudly rather than silently breaking SPF alignment. |
 | DR-3 | Done | The DMARC warning is the sharpest of the three diagnostics and is explained in the response. |
 | DR-4 | Open | Pool policy is an SES-side decision. |
 | DR-5 | Open | No warmup. |
@@ -219,7 +223,7 @@ are documented there but not automated.
 | FR-14.7 | Partial | An agent's `webhook_url` is stored but not yet dispatched to; account-level webhooks carry `received` events in the meantime. Polling, which the requirement says must always work, does. |
 | FR-15.1 – FR-15.4 | Done | Routing, internal delivery, mixed recipients, unified logging. |
 | NFR-A1 | Partial | Internal delivery is a synchronous write and a notifier wake, comfortably inside the budget; not benchmarked. |
-| FR-16.1 – FR-16.4 | Done | Payload preserved internally, carried as `agentmail.json` externally, text generated when absent. |
+| FR-16.1 – FR-16.4 | Done | Payload preserved internally, carried as an `application/accp+json` part externally, prose generated when absent. |
 | FR-17.1 – FR-17.4 | Done | Header-based threading with a subject fallback, account-scoped, whole-thread read, reply endpoint. |
 | FR-18.1 – FR-18.5 | Done | Four policies, `verified` default, audited rejections, opt-in directory searchable by capability. |
 | FR-19.1 – FR-19.5 | Done | Hop counter and ceiling, per-thread rate ceiling, refusals surfaced as errors, agent traffic counted against the account limit. |
@@ -234,9 +238,12 @@ are documented there but not automated.
    survives a restart. The port and schema exist; this is mechanical work.
 2. **SQS queues** (NFR-2.2, FR-4.5). Same reasoning, second because the queue
    is smaller than the store.
-3. **SES control plane** (FR-1.3, FR-2.2, FR-2.6, FR-7.7, DR-1, DR-2). Turns
-   the DNS records the platform issues into records that actually do something.
-4. **Auto-pause on reputation thresholds** (FR-12.3, FR-9.7). The cheapest
+3. **Run the SES path against a live account.** The control plane is wired and
+   its shapes are verified against the SDK's types, but it has never touched
+   the service. Expect the first real run to find something.
+4. **The inbound Lambda and the SNS adapter.** `/ingest/inbound` and
+   `/ingest/events` are finished and tested; nothing yet calls them from AWS.
+5. **Auto-pause on reputation thresholds** (FR-12.3, FR-9.7). The cheapest
    remaining protection against R-2, the existential risk in the SRS.
-5. **Per-agent push** (FR-14.7) and **list-scoped suppression** (FR-7.5) — the
+6. **Per-agent push** (FR-14.7) and **list-scoped suppression** (FR-7.5) — the
    two Partial rows that are closest to done.

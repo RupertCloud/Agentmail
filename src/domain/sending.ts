@@ -22,11 +22,21 @@ import {
   renderTemplate,
 } from '../util/email.js';
 import { newId, newRfcMessageId } from '../util/ids.js';
-import { HEADER_AGENT, HEADER_HOPS, HEADER_THREAD } from '../util/mime.js';
+import {
+  ACCP_VERSION,
+  HEADER_AGENT,
+  HEADER_CONVERSATION,
+  HEADER_HOPS,
+  HEADER_INTENT,
+  HEADER_VERSION,
+} from '../util/mime.js';
 import type { AgentService } from './agents.js';
 import type { EventService } from './events.js';
 import type { MailboxNotifier } from './notifier.js';
 import type { SuppressionService } from './suppression.js';
+
+/** docs/accp/SPEC.md §4. Unknown intents are accepted and treated as `notify`. */
+export type AccpIntent = 'request' | 'response' | 'notify' | 'error' | 'ack';
 
 export interface DeliveryJob {
   messageId: Id;
@@ -56,6 +66,8 @@ export interface SendEmailInput {
   campaignId?: Id;
   /** RFC Message-ID being replied to; drives threading and the hop counter. */
   inReplyTo?: string;
+  /** ACCP intent; defaults to `response` on a reply and `request` otherwise. */
+  intent?: AccpIntent;
   scheduledAt?: Timestamp;
   idempotencyKey?: string;
 }
@@ -394,11 +406,15 @@ export class SendService {
   ): Promise<Message> {
     const now = new Date().toISOString();
     const headers = { ...(parts.input.headers ?? {}) };
+    // ACCP envelope (docs/accp/SPEC.md §3). Every agent-originated message
+    // carries it; ordinary transactional mail does not pretend to.
     if (parts.agent) {
-      headers[HEADER_AGENT] = parts.agent.address;
+      headers[HEADER_VERSION] = ACCP_VERSION;
+      headers[HEADER_INTENT] = parts.input.intent ?? (parts.parent ? 'response' : 'request');
+      headers[HEADER_CONVERSATION] = parts.threadId;
       headers[HEADER_HOPS] = String(parts.hops);
+      headers[HEADER_AGENT] = parts.agent.address;
     }
-    headers[HEADER_THREAD] = parts.threadId;
 
     return this.store.createMessage({
       id: newId('msg'),
@@ -422,6 +438,9 @@ export class SendService {
       inReplyTo: parts.parent?.rfcMessageId ?? parts.input.inReplyTo ?? null,
       references: parts.parent ? [...parts.parent.references, parts.parent.rfcMessageId] : [],
       threadId: parts.threadId,
+      conversationKey: parts.agent
+        ? `${domainOf(parts.from.email)}:${parts.threadId}`
+        : null,
       agentId: parts.agent?.id ?? null,
       campaignId: parts.input.campaignId ?? null,
       templateId: parts.input.templateId ?? null,
@@ -471,6 +490,7 @@ export class SendService {
       ...outbound,
       id: newId('msg'),
       accountId: recipient.accountId,
+      conversationKey: outbound.conversationKey,
       direction: 'inbound',
       transport: 'internal',
       status: 'received',

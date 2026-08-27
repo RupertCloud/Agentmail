@@ -167,8 +167,9 @@ conversation that takes four seconds and one that takes four minutes.
   and HTML bodies.
 - **FR-16.2** On internal delivery the payload shall be preserved exactly.
 - **FR-16.3** On external delivery the payload shall be carried as an
-  `application/json` MIME part named `agentmail.json`, so it survives transit
-  through ordinary mail infrastructure and is recovered on receipt.
+  `application/accp+json` MIME part named `accp.json`, per
+  [ACCP §5.1](accp/SPEC.md#5-payload), so it survives transit through ordinary
+  mail infrastructure and is recovered on receipt.
 - **FR-16.4** A message carrying a structured payload shall also carry a
   human-readable body. Where the sender supplies none, the platform shall
   generate one from the payload.
@@ -378,6 +379,18 @@ new capability, inbound. Campaigns add list management, a composer, tracking and
 consent tooling, which share almost nothing with it.
 
 ---
+
+## A15b. Wire format
+
+The message format is specified separately, and vendor-neutrally, as the
+[Agent Communication Context Protocol](accp/SPEC.md). Requirements FR-16 to
+FR-19 are this platform's obligations; ACCP is what any other implementation
+would have to satisfy to interoperate with it.
+
+Keeping the two apart is deliberate. A wire format that only one vendor
+implements is a product feature, and agent-to-agent messaging is worth less the
+fewer agents can be reached. The protocol is therefore written to be
+implementable by a competitor without reference to this codebase.
 
 ## A16. Open questions
 

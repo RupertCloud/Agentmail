@@ -49,6 +49,7 @@ Conventions:
   "attachments": [{"filename": "receipt.pdf", "content_type": "application/pdf", "content": "<base64>"}],
   "tags": {"order": "4711"},
   "in_reply_to": "<message-id@host>",    // threads the reply
+  "intent": "request",                   // ACCP intent; default request, or response on a reply
   "scheduled_at": "2026-09-01T09:00:00Z" // up to 30 days ahead
 }
 ```

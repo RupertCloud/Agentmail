@@ -4,10 +4,9 @@ import type { EventService } from '../domain/events.js';
 import type { MailboxNotifier } from '../domain/notifier.js';
 import type { Store } from '../store/types.js';
 import type { Agent, Id, Message } from '../types.js';
-import { normalizeSubject } from '../util/email.js';
+import { domainOf, normalizeSubject } from '../util/email.js';
 import { newId, newRfcMessageId } from '../util/ids.js';
-import { HEADER_HOPS } from '../util/mime.js';
-import { parseRawMessage } from '../util/mime.js';
+import { HEADER_CONVERSATION, HEADER_HOPS, parseRawMessage } from '../util/mime.js';
 
 export type Verdict = 'PASS' | 'FAIL' | 'GRAY' | 'PROCESSING_FAILED' | 'DISABLED';
 
@@ -121,6 +120,7 @@ export class InboundService {
       inReplyTo: parsed.inReplyTo,
       references: parsed.references,
       threadId,
+      conversationKey: conversationKeyFor(parsed),
       agentId: agent.id,
       campaignId: null,
       templateId: null,
@@ -147,8 +147,25 @@ export class InboundService {
     return message;
   }
 
-  /** References first, then In-Reply-To, then a normalised-subject fallback. */
+  /**
+   * ACCP §3.3: a declared `ACCP-Conversation` beats reconstructed threading,
+   * because References gets truncated and stripped in transit. The token is
+   * opaque and not globally unique, so it is keyed by sender domain.
+   */
   private async resolveThread(agent: Agent, parsed: ReturnType<typeof parseRawMessage>): Promise<Id> {
+    const declared = parsed.headers[HEADER_CONVERSATION.toLowerCase()];
+    if (declared) {
+      const senderDomain = domainOf(parsed.from[0]?.email ?? '');
+      const scoped = `${senderDomain}:${declared}`;
+      const page = await this.store.listMessages({
+        accountId: agent.accountId,
+        agentId: agent.id,
+        limit: 100,
+      });
+      const seen = page.data.find((message) => message.conversationKey === scoped);
+      if (seen) return seen.threadId;
+    }
+
     const candidates = [...parsed.references].reverse();
     if (parsed.inReplyTo) candidates.unshift(parsed.inReplyTo);
 
@@ -170,4 +187,11 @@ export class InboundService {
 
     return newId('thr');
   }
+}
+
+/** `<sender domain>:<declared token>`, or null when the sender declared none. */
+function conversationKeyFor(parsed: ReturnType<typeof parseRawMessage>): string | null {
+  const declared = parsed.headers[HEADER_CONVERSATION.toLowerCase()];
+  if (!declared) return null;
+  return `${domainOf(parsed.from[0]?.email ?? '')}:${declared}`;
 }

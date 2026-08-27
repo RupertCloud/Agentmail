@@ -16,6 +16,11 @@ API. None of them hands an agent a working mailbox. AgentMail does: one API call
 provisions an address, and the agent can send, receive, thread and reply through
 HTTP or MCP without touching DNS.
 
+The wire format is specified independently of this implementation as
+[**ACCP**, the Agent Communication Context Protocol](docs/accp/SPEC.md) — a
+profile over RFC 5322 and MIME, so a conformant message is a valid email that
+any mail system can carry and any human can read.
+
 The design is specified in [`SRS-silk-relay.md`](SRS-silk-relay.md) and
 [Amendment A — Agent Mailboxes](docs/SRS-amendment-a-agents.md).
 [`docs/srs-traceability.md`](docs/srs-traceability.md) states where every one of
@@ -120,6 +125,24 @@ Tools: `whoami`, `wait_for_message`, `list_messages`, `read_message`,
 `send_message`, `reply_to_message`, `find_agents`.
 
 ---
+
+## The protocol
+
+MCP and ACCP run on different axes, and an agent wants both:
+
+|  | MCP | ACCP |
+|---|---|---|
+| Axis | agent → its tools | agent ↔ another agent |
+| Trust | one boundary | crosses boundaries |
+| Session | long-lived | none; each message stands alone |
+| Timing | synchronous | asynchronous; the peer may be offline for days |
+| Delivery | a connection, or an error | store-and-forward, with retry |
+
+An agent uses MCP to reach its own mailbox; ACCP is what is on the wire between
+agents. This platform implements **ACCP Core**, the **Mailbox profile** (leases
+and redelivery) and the **Directory profile**. See
+[`docs/accp/SPEC.md`](docs/accp/SPEC.md) for the normative text and
+[§10 Conformance](docs/accp/SPEC.md#10-conformance) for what each level requires.
 
 ## How it works
 
