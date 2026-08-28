@@ -324,6 +324,92 @@ export interface MessageEvent {
   metadata: Record<string, unknown>;
 }
 
+/* -------------------------------------------------------------- agent memory */
+
+/**
+ * Where a remembered fact came from.
+ *
+ * `message`   an agent read it in a message it received
+ * `inference` the agent concluded it from other memories
+ * `human`     a human told the agent directly, through an authenticated session
+ * `seed`      configured at agent creation; part of the agent's definition
+ */
+export type MemoryOrigin = 'message' | 'inference' | 'human' | 'seed';
+
+/**
+ * How much weight a memory carries. DERIVED from provenance at write time and
+ * never accepted from a caller — an agent must not be able to promote its own
+ * beliefs by asserting a trust level for them.
+ *
+ * `attested`      from a message that verified AND carried DKIM: PASS. The only
+ *                 level at which content is known to be what the sender wrote.
+ * `authenticated` the sender's identity held (DMARC aligned) but the content is
+ *                 not tamper-evident — SPF-only alignment, or no digest.
+ * `asserted`      someone said it and nothing checked: an unverified message, or
+ *                 the agent writing down its own belief.
+ * `derived`       inferred from other memories. Never exceeds the weakest source.
+ */
+export type MemoryTrust = 'attested' | 'authenticated' | 'asserted' | 'derived';
+
+/**
+ * The chain from a remembered fact back to the wire event that produced it.
+ *
+ * This is the part that does the work. ACCP proves a message arrived as sent;
+ * that proof dies the moment an agent reads the message and writes something
+ * down. Carrying the digest and the auth verdict into the memory keeps the
+ * chain intact, so a fact recalled months later can still be traced to a
+ * message whose integrity was actually checked — rather than becoming an
+ * unattributable claim the agent has no way to re-examine.
+ */
+export interface MemoryProvenance {
+  origin: MemoryOrigin;
+  /** The message this came from, for `origin: 'message'`. */
+  messageId?: Id | null;
+  rfcMessageId?: string | null;
+  /** The ACCP-Content-Digest root the message carried, verbatim. */
+  contentDigest?: string | null;
+  /** Who claimed it: the ACCP context principal, else the From address. */
+  assertedBy?: string | null;
+  /** The integrity verdict recorded at the time the message was read. */
+  integrity?: Message['payloadIntegrity'];
+  /** The DKIM verdict at the same moment. */
+  dkim?: string | null;
+  /** Memories this was inferred from, for `origin: 'inference'`. */
+  derivedFrom?: Id[];
+}
+
+/**
+ * One durable fact an agent knows.
+ *
+ * Memory is keyed so that later knowledge supersedes earlier knowledge rather
+ * than accumulating beside it, and revoked by tombstone rather than deletion —
+ * an agent that silently forgot why it believes something is the failure this
+ * whole model exists to prevent. `purge` exists separately for the cases where
+ * the data genuinely has to go.
+ */
+export interface Memory {
+  id: Id;
+  accountId: Id;
+  agentId: Id;
+  /** Stable identifier for the thing known, e.g. `policy.refund_window`. */
+  key: string;
+  value: unknown;
+  /** One line a human can read in an audit without decoding `value`. */
+  summary: string;
+  trust: MemoryTrust;
+  provenance: MemoryProvenance;
+  threadId?: Id | null;
+  /** The memory this replaced, for the same key. */
+  supersedes?: Id | null;
+  /** Set when a later memory took over this key. */
+  supersededAt?: Timestamp | null;
+  /** Knowledge that should go stale rather than persist forever. */
+  expiresAt?: Timestamp | null;
+  revokedAt?: Timestamp | null;
+  revokedReason?: string | null;
+  createdAt: Timestamp;
+}
+
 /* --------------------------------------------------------------- suppression */
 
 export type SuppressionReason =

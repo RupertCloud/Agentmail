@@ -255,7 +255,75 @@ The platform parses the MIME, applies the inbox policy using those verdicts,
 threads the message against what the mailbox already holds, and delivers it.
 `agentmail.json` parts are recovered into `structured`.
 
-## 10. MCP
+## 10. Memory
+
+An agent that only has its inbox has no memory: a thread caps out, a restart
+loses whatever was held in process, and a fact learned in one conversation is
+unavailable in the next. Memory is durable, keyed knowledge that outlives both.
+
+The part that matters is that a memory remembers *where it came from*. Integrity
+checking protects a message from the moment it is sent to the moment it is read
+— and then stops. If the agent reads a verified message and writes down what it
+learned, the digest and the DKIM verdict are not part of what it wrote, and the
+fact becomes an unattributable claim. Recording it through the message keeps
+that chain intact:
+
+```bash
+curl -X POST https://api.agentmail.dev/v1/agents/me/memory \
+  -H "Authorization: Bearer $AGENT_KEY" \
+  -d '{
+    "key": "policy.refund_window",
+    "value": 30,
+    "summary": "Partner states a 30-day refund window.",
+    "origin": "message",
+    "message_id": "msg_01J..."
+  }'
+```
+
+The platform reads the verdict off that message; it does not take your word for
+it. The response carries a `trust` level you did not choose:
+
+| `trust` | What it means | Safe to act on? |
+| --- | --- | --- |
+| `attested` | The message verified **and** carried `dkim: PASS` | Yes |
+| `authenticated` | The sender is who they claim, the body is not tamper-evident | No |
+| `asserted` | Someone said it, nothing checked it | No |
+| `derived` | Concluded from other memories | No |
+
+Both halves are needed for `attested` because they answer different questions.
+DMARC can pass on SPF alignment alone with DKIM broken, so an authenticated
+sender tells you nothing about an intact body — and with SES Easy DKIM the
+digest header is not covered by the signature, so a matching digest alone is not
+tamper-proof either. Only together do they mean *this sender wrote exactly this*.
+
+Two rules follow, and both are enforced rather than advised:
+
+- **You cannot label your own belief.** `trust` is computed from provenance. A
+  `trust` field in your request body is ignored.
+- **Inference cannot launder trust.** A memory with `origin: "inference"` is
+  capped at the weakest memory it cites. Concluding something from two guesses
+  does not make it known.
+
+Recall the live view — newest value per key, skipping anything revoked,
+superseded or expired:
+
+```bash
+curl "https://api.agentmail.dev/v1/agents/me/memory?key_prefix=policy.&min_trust=attested" \
+  -H "Authorization: Bearer $AGENT_KEY"
+```
+
+Use `min_trust=attested` before taking an irreversible action. Everything below
+that is recall, not authority — reason with it, cite it, reply about it, but
+check with a human before acting on it alone.
+
+Writing the same key again supersedes the old value rather than piling up beside
+it. `DELETE /v1/agents/me/memory/:id` retracts a memory but keeps the tombstone,
+so an audit can still show what the agent believed and when it stopped;
+`?purge=true` is the irreversible one, for content that must not persist.
+
+Over MCP the same three operations are `remember`, `recall` and `forget`.
+
+## 11. MCP
 
 ```json
 {

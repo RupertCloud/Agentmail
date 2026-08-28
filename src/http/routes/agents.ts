@@ -1,6 +1,6 @@
 import { requireAgentAccess, requireFull, requireRead, requireSend } from '../../domain/accounts.js';
 import { badRequest } from '../../errors.js';
-import type { Agent, InboxPolicy, MailboxState } from '../../types.js';
+import type { Agent, InboxPolicy, MailboxState, MemoryOrigin, MemoryTrust } from '../../types.js';
 import {
   optionalBoolean,
   optionalNumber,
@@ -9,7 +9,7 @@ import {
   requiredString,
 } from '../params.js';
 import type { RequestContext, Router } from '../router.js';
-import { agentJson, apiKeyJson, directoryJson, messageJson } from '../serialize.js';
+import { agentJson, apiKeyJson, directoryJson, memoryJson, messageJson } from '../serialize.js';
 
 /**
  * Resolves the agent a request is about, enforcing that an agent-scoped key
@@ -197,6 +197,77 @@ export function registerAgentRoutes(router: Router): void {
       status: 200,
       body: { thread_id: ctx.params.threadId, data: messages.map((message) => messageJson(message)) },
     };
+  });
+
+  /* -------------------------------------------------------------- memory */
+
+  router.get('/v1/agents/:id/memory', async (ctx) => {
+    requireRead(ctx.auth);
+    const agent = await resolveAgent(ctx);
+    const memories = await ctx.platform.memory.recall(agent, {
+      key: ctx.query.get('key') ?? undefined,
+      keyPrefix: ctx.query.get('key_prefix') ?? undefined,
+      minTrust: (ctx.query.get('min_trust') as MemoryTrust) ?? undefined,
+      threadId: ctx.query.get('thread_id') ?? undefined,
+      includeExpired: ctx.query.get('include_expired') === 'true',
+      includeSuperseded: ctx.query.get('include_superseded') === 'true',
+      limit: Number(ctx.query.get('limit') ?? 50),
+    });
+    return { status: 200, body: { data: memories.map(memoryJson) } };
+  });
+
+  router.post('/v1/agents/:id/memory', async (ctx) => {
+    requireSend(ctx.auth);
+    const agent = await resolveAgent(ctx);
+    const origin = (optionalString(ctx.body, 'origin') ?? 'inference') as MemoryOrigin;
+
+    // `message` origin resolves the message server-side rather than trusting a
+    // caller-supplied verdict: the whole point is that the integrity record
+    // comes from what the platform observed, not from what the agent claims.
+    let message;
+    if (origin === 'message') {
+      const messageId = requiredString(ctx.body, 'message_id');
+      message = await ctx.platform.mailbox.get(agent, messageId);
+    }
+
+    const memory = await ctx.platform.memory.remember(agent, {
+      key: requiredString(ctx.body, 'key'),
+      value: (ctx.body as Record<string, unknown>).value,
+      summary: optionalString(ctx.body, 'summary'),
+      origin,
+      message,
+      derivedFrom: optionalStringArray(ctx.body, 'derived_from'),
+      assertedBy: optionalString(ctx.body, 'asserted_by'),
+      threadId: optionalString(ctx.body, 'thread_id') ?? message?.threadId ?? null,
+      expiresAt: optionalString(ctx.body, 'expires_at') ?? null,
+    });
+    return { status: 201, body: memoryJson(memory) };
+  });
+
+  router.get('/v1/agents/:id/memory/:memoryId', async (ctx) => {
+    requireRead(ctx.auth);
+    const agent = await resolveAgent(ctx);
+    const memory = await ctx.platform.memory.get(agent, ctx.params.memoryId);
+    return {
+      status: 200,
+      body: { ...memoryJson(memory), may_act_on: ctx.platform.memory.mayActOn(memory) },
+    };
+  });
+
+  router.delete('/v1/agents/:id/memory/:memoryId', async (ctx) => {
+    requireSend(ctx.auth);
+    const agent = await resolveAgent(ctx);
+    // Default is a tombstone; `?purge=true` is the irreversible one.
+    if (ctx.query.get('purge') === 'true') {
+      await ctx.platform.memory.purge(agent, ctx.params.memoryId);
+      return { status: 204, body: null };
+    }
+    const memory = await ctx.platform.memory.forget(
+      agent,
+      ctx.params.memoryId,
+      ctx.query.get('reason') ?? undefined,
+    );
+    return { status: 200, body: memoryJson(memory) };
   });
 
   /* ----------------------------------------------------------- directory */

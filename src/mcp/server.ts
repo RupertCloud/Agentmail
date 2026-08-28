@@ -277,6 +277,78 @@ export class AgentMailMcpServer {
           }),
       },
       {
+        name: 'remember',
+        title: 'Remember something',
+        description:
+          'Stores a durable fact for this agent, keyed so a later value replaces an earlier one. ' +
+          'You do not choose how much the fact is trusted — that is derived from where it came ' +
+          'from. Pass `origin: "message"` with the `message_id` you read it in and the platform ' +
+          'carries that message\'s integrity verdict and content digest into the memory, which is ' +
+          'the only way a fact can become `attested` and therefore actionable later. ' +
+          '`origin: "inference"` requires `derived_from`, and the result is never trusted more ' +
+          'than the weakest memory it cites — you cannot conclude your way to certainty.',
+        inputSchema: object(
+          {
+            key: { type: 'string', description: 'Stable name for the thing known, e.g. `policy.refund_window`.' },
+            value: { description: 'The fact itself. Any JSON value.' },
+            summary: { type: 'string', description: 'One line a human can read in an audit.' },
+            origin: {
+              type: 'string',
+              enum: ['message', 'inference', 'human', 'seed'],
+              description: 'Where this came from. Determines how far it can be trusted.',
+            },
+            message_id: { type: 'string', description: 'Required for origin `message`.' },
+            derived_from: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Required for origin `inference`: the memory ids this was concluded from.',
+            },
+            expires_at: { type: 'string', description: 'ISO 8601. Knowledge that should go stale.' },
+          },
+          ['key', 'origin'],
+        ),
+        handler: async (args, agentId) => this.client.remember(agentId, args as Record<string, unknown>),
+      },
+      {
+        name: 'recall',
+        title: 'Recall what is known',
+        description:
+          'Returns this agent\'s durable memory, newest value per key, skipping anything revoked, ' +
+          'superseded or expired. Each entry carries a `trust` level and the provenance chain back ' +
+          'to the message it came from. Filter with `min_trust: "attested"` to see only what is ' +
+          'safe to act on without checking with a human — everything below that is recall, not ' +
+          'authority: cite it and reason about it, but do not take an irreversible action on it.',
+        inputSchema: object({
+          key: { type: 'string' },
+          key_prefix: { type: 'string', description: 'e.g. `policy.` to get every policy fact.' },
+          min_trust: { type: 'string', enum: ['attested', 'authenticated', 'asserted', 'derived'] },
+          thread_id: { type: 'string' },
+          limit: { type: 'number' },
+        }),
+        handler: async (args, agentId) => this.client.recall(agentId, args as Record<string, unknown>),
+      },
+      {
+        name: 'forget',
+        title: 'Forget something',
+        description:
+          'Retracts a memory so it is no longer recalled or acted on. The record is kept as a ' +
+          'tombstone so an audit can still explain what was believed and when it stopped — pass ' +
+          '`purge: true` only when the content itself must not persist.',
+        inputSchema: object(
+          {
+            memory_id: { type: 'string' },
+            reason: { type: 'string' },
+            purge: { type: 'boolean' },
+          },
+          ['memory_id'],
+        ),
+        handler: async (args, agentId) =>
+          this.client.forget(agentId, stringArg(args, 'memory_id'), {
+            reason: (args as Record<string, unknown>).reason as string | undefined,
+            purge: (args as Record<string, unknown>).purge === true,
+          }),
+      },
+      {
         name: 'find_agents',
         title: 'Find other agents',
         description:

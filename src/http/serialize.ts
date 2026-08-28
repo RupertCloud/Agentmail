@@ -5,6 +5,7 @@ import type {
   Contact,
   ContactList,
   Domain,
+  Memory,
   Message,
   MessageEvent,
   Suppression,
@@ -99,6 +100,35 @@ export function agentJson(agent: Agent): Record<string, unknown> {
     max_hops: agent.maxHops,
     max_thread_rate: agent.maxThreadRate,
     created_at: agent.createdAt,
+  };
+}
+
+export function memoryJson(memory: Memory): Record<string, unknown> {
+  return {
+    id: memory.id,
+    object: 'memory',
+    agent_id: memory.agentId,
+    key: memory.key,
+    value: memory.value,
+    summary: memory.summary,
+    trust: memory.trust,
+    provenance: {
+      origin: memory.provenance.origin,
+      message_id: memory.provenance.messageId ?? null,
+      rfc_message_id: memory.provenance.rfcMessageId ?? null,
+      content_digest: memory.provenance.contentDigest ?? null,
+      asserted_by: memory.provenance.assertedBy ?? null,
+      integrity: memory.provenance.integrity ?? null,
+      dkim: memory.provenance.dkim ?? null,
+      derived_from: memory.provenance.derivedFrom ?? [],
+    },
+    thread_id: memory.threadId ?? null,
+    supersedes: memory.supersedes ?? null,
+    superseded_at: memory.supersededAt ?? null,
+    expires_at: memory.expiresAt ?? null,
+    revoked_at: memory.revokedAt ?? null,
+    revoked_reason: memory.revokedReason ?? null,
+    created_at: memory.createdAt,
   };
 }
 

@@ -250,7 +250,7 @@ Schema the sender claims to conform to. Receivers MUST NOT require it.
 
 This is a deliberate limit. Attempts to standardise a universal
 agent-interaction ontology have consistently failed; what survives is a shared
-envelope with domain-specific contents. §12 discusses what a capability
+envelope with domain-specific contents. §13 discusses what a capability
 registry would need to look like if the ecosystem later wants stronger
 guarantees.
 
@@ -406,7 +406,7 @@ The remedy therefore is not agreement but **attenuable signed credentials** —
 SPKI/SDSI (RFC 2693), macaroons, or W3C Verifiable Credentials — in which the
 principal signs an assertion that the agent speaks for it, the agent attenuates
 and forwards it, and a receiver verifies against the principal's key without
-consulting anyone. This is the direction §12.7 asks about, and its cost is key
+consulting anyone. This is the direction §13.7 asks about, and its cost is key
 distribution rather than quorum.
 
 The one genuine echo of Lamport is directional: his signed-message variant
@@ -646,7 +646,7 @@ So the digest converts silent corruption into a detected condition, and — wher
 DKIM covers it — tampering into a detected condition too. It is not an
 end-to-end guarantee. A payload that must be tamper-evident regardless of
 transport needs a signature over the envelope itself (JWS or S/MIME), which
-carries the same key-distribution cost as §12.7 and is not required here.
+carries the same key-distribution cost as §13.7 and is not required here.
 
 The digest also covers the `context` bytes — `principal`, `delegation` and the
 rest travel inside the `application/accp+json` part. A `verified` verdict
@@ -779,9 +779,129 @@ delivery means a message can arrive twice.
 
 Adds §7.2 resolution at `/.well-known/accp/agent`.
 
+### 11.4 Memory profile (optional)
+
+Adds durable, provenance-carrying knowledge for an agent (§12).
+
+An implementation conforms to the **Memory profile** if:
+
+1. Every stored fact carries the provenance of §12.4.
+2. `trust` is derived at write time from provenance and cannot be set by the
+   agent recording the fact (§12.3).
+3. A fact reaches `attested` only under `verified` payload integrity **and**
+   `dkim: PASS`.
+4. An inference is capped at the weakest memory it cites.
+5. Retraction tombstones by default, with deletion available separately (§12.6).
+
+An implementation that stores agent memory without provenance does not conform,
+and SHOULD NOT describe its memory as trusted.
+
 ---
 
-## 12. Open questions
+## 12. Memory and provenance
+
+### 12.1 The gap this closes
+
+Everything in §9.2 protects a message between the moment it is sent and the
+moment it is read. That protection ends there. An agent reads a verified
+message, forms a belief, and writes the belief down; the digest, the DKIM
+verdict and the sender's identity are not part of what it wrote. Six months
+later the agent acts on "the refund window is 30 days" with no way to tell
+whether that came from an attested message, a guess, or a line of text in an
+email footer written by someone else entirely.
+
+This is the same confused-deputy shape as §6.3, moved from the wire into the
+store. It is arguably worse there, because the wire version is at least
+re-checkable while the message is in hand, and the stored version is not
+re-checkable at all once the provenance is gone.
+
+The boundary that matters here is temporal rather than spatial. An agent
+reading its own memory is receiving a message from a past instance of itself
+that it cannot interrogate, cannot authenticate, and has no digest for. That
+this happens inside one process, or even inside one agent, does not make it a
+smaller problem.
+
+### 12.2 Memory records
+
+A conforming implementation that offers durable agent memory MUST store, with
+each remembered fact:
+
+| Field | Meaning |
+| --- | --- |
+| `key` | Stable name for the thing known. A later value for a key supersedes the earlier one. |
+| `value` | The fact. |
+| `summary` | One line readable in an audit without decoding `value`. |
+| `trust` | Derived (§12.3). MUST NOT be accepted from the caller. |
+| `provenance` | The chain back to the wire event (§12.4). |
+| `expires_at` | Optional. Knowledge that should go stale rather than accrue. |
+| `revoked_at` | Set by a retraction. The row is kept. |
+
+### 12.3 The trust ladder
+
+Trust MUST be derived from provenance at write time, and MUST NOT be settable
+by the agent recording the fact. An agent that can label its own belief
+`attested` has no integrity model at all — it has a field.
+
+| Level | Condition |
+| --- | --- |
+| `attested` | From a message with `payload` integrity `verified` **and** `dkim: PASS`. |
+| `authenticated` | Sender identity held (DMARC or DKIM pass) but content is not tamper-evident. |
+| `asserted` | Someone said it and nothing checked it. |
+| `derived` | Concluded from other memories. |
+
+Both halves are required for `attested` for the reason given in §9.2: DMARC can
+pass on SPF alignment alone with DKIM broken, so an authenticated sender says
+nothing about an intact body; and a matching digest proves nothing if the
+header carrying it was not itself covered by a signature.
+
+**An inference MUST NOT be trusted more than the weakest memory it cites.** A
+conforming implementation caps a `derived` memory at the weakest of its
+sources. Without this rule an agent can launder two rumours into a fact by
+concluding something from them, and the ladder becomes decorative.
+
+### 12.4 Provenance
+
+For `origin: message`, provenance MUST carry the message id, the RFC 5322
+Message-ID, the `ACCP-Content-Digest` header value verbatim, the recorded
+`payload` integrity verdict, the DKIM verdict, and the asserting party — the
+context `principal` where one was present, else the `From` address. Carrying
+the digest itself, rather than only the verdict, is what lets a later reader
+re-derive the check instead of trusting a stored boolean.
+
+For `origin: inference`, provenance MUST carry the ids of the memories the
+conclusion was drawn from, and those memories MUST belong to the same agent.
+
+### 12.5 Acting on memory
+
+An implementation SHOULD gate autonomous, irreversible action on
+`trust: attested`, unexpired and unrevoked. Everything below that level is
+recall, not authority: an agent may reason with it, cite it, and reply about
+it, but SHOULD NOT take an irreversible action on it without a human or a
+stronger source.
+
+This is the §6.2 rule — asserted is not proved — applied to the store rather
+than to the wire, and it is where §6.2 was always going to be needed. Context
+travels once; memory is consulted forever.
+
+### 12.6 Retraction
+
+A retraction SHOULD tombstone rather than delete. An agent that silently
+forgot why it believed something is the failure this model exists to prevent,
+and the tombstone is what lets an audit reconstruct what was believed and when
+it stopped. Implementations MUST also offer real deletion for the cases where
+the content itself must not persist; the two are different operations and
+SHOULD NOT be conflated.
+
+### 12.7 Bounded conversation
+
+Durable memory makes long-running agent conversation practical, and thereby
+makes unbounded conversation possible. §9.4's hop ceiling and per-thread rate
+limit are the floor, not the whole answer. An implementation SHOULD ensure
+every message either asserts something checkable or commits to something with
+a deadline, so that a thread which is neither converging nor committing can be
+detected and stopped rather than continuing indefinitely at cost.
+
+## 13. Open questions
 
 1. **Payload semantics.** §5.3 standardises the envelope only. Is a capability
    registry with schema references worth the coordination cost, or does it
@@ -1019,7 +1139,7 @@ Sketched so that anyone attempting it does not have to rediscover it:
   requirement most likely to be missed, and missing it turns a privacy feature
   into an impersonation vector.
 - **How a verifier obtains the verifying key and the issuer's key**, which is
-  the same key-distribution problem as §12.7 in different clothing — moved, not
+  the same key-distribution problem as §13.7 in different clothing — moved, not
   removed.
 - **A statement of what the proof does not cover.** A proof about a principal
   says nothing about payload integrity, and vice versa; §9.2's separation of

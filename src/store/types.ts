@@ -1,6 +1,7 @@
 import type {
   Account,
   Agent,
+  Memory,
   ApiKey,
   AuditEntry,
   Campaign,
@@ -59,6 +60,17 @@ export interface AgentDirectoryQuery {
  * Persistence port. The in-memory implementation is the reference; a Postgres
  * implementation backs the schema in `migrations/001_init.sql`.
  */
+/* ------------------------------------------------------------- agent memory */
+
+export interface MemoryFilter {
+  accountId: Id;
+  agentId: Id;
+  key?: string;
+  keyPrefix?: string;
+  threadId?: Id;
+  limit?: number;
+}
+
 export interface Store {
   /* accounts and users */
   createAccount(account: Account): Promise<Account>;
@@ -93,6 +105,13 @@ export interface Store {
   updateAgent(id: Id, patch: Partial<Agent>): Promise<Agent>;
   deleteAgent(id: Id): Promise<void>;
   searchDirectory(query: AgentDirectoryQuery): Promise<Agent[]>;
+
+  createMemory(memory: Memory): Promise<Memory>;
+  getMemory(id: Id): Promise<Memory | null>;
+  /** Newest first, so the live value for a key is the first row. */
+  listMemories(filter: MemoryFilter): Promise<Memory[]>;
+  updateMemory(id: Id, patch: Partial<Memory>): Promise<Memory>;
+  deleteMemory(id: Id): Promise<void>;
 
   /* messages and events */
   createMessage(message: Message): Promise<Message>;

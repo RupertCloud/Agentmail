@@ -9,6 +9,7 @@ import type {
   Domain,
   Id,
   Message,
+  Memory,
   MessageEvent,
   Suppression,
   Template,
@@ -18,7 +19,7 @@ import type {
   WebhookDelivery,
 } from '../types.js';
 import { notFound } from '../errors.js';
-import type { AgentDirectoryQuery, MessageFilter, Page, Store } from './types.js';
+import type { AgentDirectoryQuery, MemoryFilter, MessageFilter, Page, Store } from './types.js';
 
 /** Deep-ish clone so callers cannot mutate stored records by reference. */
 function clone<T>(value: T): T {
@@ -70,6 +71,7 @@ export class MemoryStore implements Store {
   private readonly apiKeys = new Collection<ApiKey>();
   private readonly domains = new Collection<Domain>();
   private readonly agents = new Collection<Agent>();
+  private readonly memories = new Collection<Memory>();
   private readonly messages = new Collection<Message>();
   private readonly events = new Collection<MessageEvent>();
   private readonly suppressions = new Collection<Suppression>();
@@ -181,6 +183,34 @@ export class MemoryStore implements Store {
       );
     });
     return results.slice(0, query.limit ?? 25);
+  }
+
+  /* agent memory */
+
+  async createMemory(memory: Memory): Promise<Memory> {
+    return this.memories.insert(memory);
+  }
+  async getMemory(id: Id): Promise<Memory | null> {
+    return this.memories.get(id);
+  }
+  async listMemories(filter: MemoryFilter): Promise<Memory[]> {
+    const rows = this.memories.filter((memory) => {
+      if (memory.accountId !== filter.accountId) return false;
+      if (memory.agentId !== filter.agentId) return false;
+      if (filter.key && memory.key !== filter.key) return false;
+      if (filter.keyPrefix && !memory.key.startsWith(filter.keyPrefix)) return false;
+      if (filter.threadId && memory.threadId !== filter.threadId) return false;
+      return true;
+    });
+    // Newest first: the live value for a key is then simply the first row.
+    rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+    return rows.slice(0, filter.limit ?? 50);
+  }
+  async updateMemory(id: Id, patch: Partial<Memory>): Promise<Memory> {
+    return this.memories.update(id, patch, 'Memory');
+  }
+  async deleteMemory(id: Id): Promise<void> {
+    this.memories.delete(id);
   }
 
   /* messages and events */
