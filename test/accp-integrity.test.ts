@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import {
   HEADER_CONTENT_DIGEST,
+  attachmentsContent,
   buildContentDigest,
   buildRawMessage,
   formatContentDigest,
@@ -181,4 +183,55 @@ test('S3 — a redelivered Message-ID is flagged as a replay', async () => {
 
   assert.equal(first.delivered[0].isReplay, false, 'the first arrival is not a replay');
   assert.equal(second.delivered[0].isReplay, true, 'the redelivery of the same Message-ID is');
+});
+
+test('V1 — a folded continuation cannot inject a second payload field', async () => {
+  // The C0 fix counted duplicate header LINES. RFC 5322 folding lets an attacker
+  // append `; payload=<forged>` as a continuation of the genuine header, keeping
+  // the line count at one, and last-field-wins then took the forged value.
+  const raw = honest();
+  const hp = parseRawMessage(raw);
+  const tampered = hp.structuredRaw!.replace('"quantity": 40', '"quantity": 4000');
+  const env: DigestEnvelope = {
+    messageId: '<i1@partner.test>',
+    from: 'buyer@partner.test',
+    date: 'Fri, 28 Aug 2026 00:00:00 GMT',
+  };
+  const evil = buildContentDigest(env, { payload: tampered, text: 'Requesting a quote.', attachments: '' });
+
+  const forged = swapBody(raw, hp.structuredRaw!, tampered).replace(
+    /(ACCP-Content-Digest:[^\r]*(?:\r\n[ \t][^\r]*)*)/,
+    `$1\r\n ; payload=${evil.leaves.payload}; root=${evil.root}`,
+  );
+
+  const msg = await ingestTo(forged, { spf: 'PASS', dkim: 'FAIL', dmarc: 'PASS' });
+  assert.notEqual(msg.payloadIntegrity, 'verified', 'a folded field injection must never verify');
+  assert.equal(msg.payloadIntegrity, 'digest_missing');
+});
+
+test('V2 — one crafted attachment cannot forge as two', () => {
+  // contentType comes from an attacker-controllable MIME header. With a
+  // delimiter-joined encoding, putting the separator structure inside the
+  // content type made two attachments and one byte-identical.
+  const c1 = Buffer.from('invoice for 40 units').toString('base64');
+  const c2 = Buffer.from('terms and conditions').toString('base64');
+  const honestPair = attachmentsContent([
+    { filename: 'invoice.txt', contentType: 'text/plain', content: c1 },
+    { filename: 'terms.txt', contentType: 'text/plain', content: c2 },
+  ]);
+  const hash = createHash('sha256').update(c1, 'base64').digest('base64');
+  const lenPrefixed = (v: string) => {
+    const b = Buffer.from(v, 'utf8');
+    const p = Buffer.alloc(8);
+    p.writeBigUInt64BE(BigInt(b.length));
+    return Buffer.concat([p, b]).toString('base64');
+  };
+  const forgedSingle = attachmentsContent([
+    {
+      filename: 'invoice.txt',
+      contentType: `text/plain.${hash}|${lenPrefixed('terms.txt')}.text/plain`,
+      content: c2,
+    },
+  ]);
+  assert.notEqual(honestPair, forgedSingle, 'the attachment encoding must be injective');
 });

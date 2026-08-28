@@ -5,11 +5,18 @@ A record of trying to break the `ACCP-Content-Digest` message-integrity scheme
 security claim is worth exactly as much as the attacks it survived, and a reader
 deciding whether to rely on `payload_integrity: verified` deserves to see them.
 
-**Status: FIXED.** All three red-team passes plus the author attack are
-complete, every finding verified against built code, and all 16 addressed in the
-v2 commitment scheme. 79 tests pass, with a dedicated test per fixed attack
-(C0–C10, S1/S2, S3). The findings below are kept as the record of what was
-broken and how it was closed.
+**Status: round 2 complete — v2 was itself broken, v3 is the current scheme.**
+All three red-team passes plus the author attack closed the original 16 defects
+in v2. A follow-up adversarial pass **against v2** then found two more, both
+introduced *by the v2 fix itself*, one of them a working forge. Those are fixed
+in v3. 81 tests pass, with a dedicated test per attack.
+
+> **The lesson, recorded because it keeps repeating.** After v1 I wrote "fixed"
+> and moved on; v1 was thoroughly broken. After v2 I wrote "fixed" again — and
+> v2 contained a forge as severe as the one it replaced (V1 below), created by
+> the fix. A patch to a security construction is a new construction, and earns
+> no more trust than the original until it has been attacked on its own terms.
+> "Confirmed secure" is not a state this document will ever claim.
 
 Headline was: **16 confirmed defects — 10 in code, 6 in the spec/guidance**,
 including one **critical in-transit payload forge**. The v1 scheme's two
@@ -86,7 +93,18 @@ Two findings — the self-referential root and the empty-Message-ID binding — 
 reported *independently* by the author and both red-teamers, which is the kind of
 convergence that makes them worth trusting.
 
-### Code defects
+### Round 2 — defects introduced by the v2 fix (found attacking v2)
+
+| # | Severity | Status | Summary |
+|---|----------|--------|---------|
+| **V1** | **Critical** | **Fixed in v3, forge reproduced** | **Folded-continuation field injection.** The C0 fix counted duplicate header *lines*. RFC 5322 folding lets an attacker append `; payload=<forged>; root=<forged>` as a *continuation* of the genuine header — one line, so the counter reads 1 — and `parseContentDigest` was last-field-wins. A tampered `{"quantity": 4000}` returned `verified`, `modifiedParts: []`. Fixed by refusing a header with any repeated field key outright, which closes the class regardless of how the duplicate arrives. |
+| **V2** | High | Fixed in v3 | **Attachment-set forgery by delimiter collision.** `attachmentsContent` joined `filename.contentType.hash` with `.` and `|`, and `contentType` comes from an attacker-controllable MIME header. Putting the separator structure inside one content type makes *one* crafted attachment byte-identical to *two* honest ones, so the set is substitutable under a matching digest. Fixed by length-prefixing every component (count, name, type, hash). |
+
+Because the commitment bytes changed for security reasons, the construction
+labels moved to `ACCP-leaf-v3` / `ACCP-root-v3`: two implementations must never
+both claim `v2` while hashing differently.
+
+### Round 1 — code defects (v1)
 
 | # | Severity | Status | Summary |
 |---|----------|--------|---------|

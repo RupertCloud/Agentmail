@@ -51,8 +51,8 @@ export const HEADER_PAYLOAD_DIGEST = 'ACCP-Payload-Digest';
  * gives one value to sign — verified by RECOMPUTING it from content, never
  * (as v1 did) from the header's own claimed leaves.
  */
-const LEAF_LABEL = 'ACCP-leaf-v2';
-const ROOT_LABEL = 'ACCP-root-v2';
+const LEAF_LABEL = 'ACCP-leaf-v3';
+const ROOT_LABEL = 'ACCP-root-v3';
 
 /**
  * Content parts committed to, in a fixed order. `attachments` is a single leaf
@@ -99,14 +99,23 @@ export function partDigest(part: string, env: DigestEnvelope, content: string): 
   );
 }
 
-/** Canonical bytes the `attachments` leaf commits to: ordered name+type+hash. */
+/**
+ * Canonical bytes the `attachments` leaf commits to: the count, then each
+ * attachment's name, type and content hash — every component length-prefixed.
+ *
+ * Delimiters would not do. `contentType` comes from an attacker-controllable
+ * MIME header, so a `.`/`|`-joined encoding lets one crafted attachment forge
+ * as two: put the separator structure inside the content type and the joined
+ * string is byte-identical. Length prefixes make the encoding injective.
+ */
 export function attachmentsContent(attachments: Attachment[] | undefined): string {
-  return (attachments ?? [])
-    .map((a) => {
-      const hash = createHash('sha256').update(a.content, 'base64').digest('base64');
-      return `${field(a.filename).toString('base64')}.${a.contentType}.${hash}`;
-    })
-    .join('|');
+  const list = attachments ?? [];
+  const parts: Buffer[] = [field(String(list.length))];
+  for (const a of list) {
+    const hash = createHash('sha256').update(a.content, 'base64').digest('base64');
+    parts.push(field(a.filename), field(a.contentType), field(hash));
+  }
+  return Buffer.concat(parts).toString('base64');
 }
 
 /**
@@ -149,7 +158,13 @@ export function parseContentDigest(header: string | undefined): ContentDigest | 
   for (const piece of header.split(';')) {
     const idx = piece.indexOf('=');
     if (idx === -1) continue;
-    fields[piece.slice(0, idx).trim().toLowerCase()] = piece.slice(idx + 1).trim();
+    const key = piece.slice(0, idx).trim().toLowerCase();
+    // A repeated field is an injection attempt, not something to merge. Counting
+    // header *lines* is not enough: RFC 5322 folding lets an attacker append
+    // `; payload=<forged>` as a continuation of the genuine header, keeping the
+    // line count at one. Refuse the whole header instead of taking last-wins.
+    if (key in fields) return null;
+    fields[key] = piece.slice(idx + 1).trim();
   }
   if (!fields.root) return null;
   const leaves: Record<string, string> = {};
