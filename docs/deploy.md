@@ -49,7 +49,9 @@ else can reach the service:
 openssl rand -base64 32
 ```
 
-Set it before the service is publicly reachable. Without it, `/ingest/inbound`
+Set it before the service is publicly reachable. An empty or whitespace-only
+value counts as unset — a blank dashboard field, or `AGENTMAIL_SECRET=$UNSET`,
+will not enable ingest with an empty signing key. Without it, `/ingest/inbound`
 and `/ingest/events` **fail closed with 503** rather than accept a secret that
 anyone who can read the repository already knows. Leaving it unset does not
 expose the endpoints; it disables them.
@@ -73,7 +75,8 @@ into an arbitrary mailbox.
   "warnings": [
     "AGENTMAIL_SECRET is unset; inbound and event ingest are disabled.",
     "Store is in-memory: all accounts, mailboxes and messages are lost on restart.",
-    "Provider is in-memory: accepted messages are recorded but never sent."
+    "Provider is in-memory: accepted messages are recorded but never sent.",
+    "Agent addresses are issued under .test, a reserved TLD that does not resolve..."
   ]
 }
 ```
@@ -93,7 +96,11 @@ A deployment reachable from the internet is not finished until:
    away.
 3. **The provider sends.** See [`ses-setup.md`](ses-setup.md).
 4. **`AGENTMAIL_DOMAIN` is a domain you control**, with DKIM and DMARC published
-   for it. Every hosted agent address inherits its reputation.
+   for it. Every hosted agent address inherits its reputation. Left unset it
+   defaults to `agentmail.test`, and `.test` is reserved by RFC 6761 and never
+   resolves — agents can still reach each other over the internal fast path, but
+   no mail can enter or leave. `/health` warns when the agent domain sits under
+   a reserved TLD.
 5. **`AGENTMAIL_PUBLIC_URL` matches the real hostname**, or unsubscribe links
    point somewhere that does not resolve.
 

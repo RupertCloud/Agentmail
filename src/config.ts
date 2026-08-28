@@ -44,6 +44,7 @@ function int(value: string | undefined, fallback: number): number {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const platformDomain = env.AGENTMAIL_DOMAIN ?? 'agentmail.test';
+  const configuredSecret = env.AGENTMAIL_SECRET?.trim();
   const port = int(env.PORT, 8080);
   return {
     host: env.HOST ?? '0.0.0.0',
@@ -62,9 +63,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxWaitSeconds: int(env.AGENTMAIL_MAX_WAIT_SECONDS, 60),
     initialDailySendLimit: int(env.AGENTMAIL_INITIAL_DAILY_LIMIT, 100),
     maxSendAttempts: int(env.AGENTMAIL_MAX_SEND_ATTEMPTS, 5),
-    secret: env.AGENTMAIL_SECRET ?? DEFAULT_SECRET,
+    secret: configuredSecret || DEFAULT_SECRET,
     // Derived from the value, not from whether the variable was set, so
-    // explicitly configuring the published default is caught too.
-    secretIsDefault: (env.AGENTMAIL_SECRET ?? DEFAULT_SECRET) === DEFAULT_SECRET,
+    // explicitly configuring the published default is caught too. An empty or
+    // whitespace-only value counts as unset: a dashboard field left blank, or
+    // `AGENTMAIL_SECRET=$UNSET_VAR`, must not enable ingest with an empty key.
+    secretIsDefault: !configuredSecret || configuredSecret === DEFAULT_SECRET,
   };
 }
