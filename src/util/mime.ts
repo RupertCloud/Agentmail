@@ -5,7 +5,7 @@
  * text+html, multipart/mixed for attachments, and the `agentmail.json` part
  * that carries an agent's structured payload across external transport.
  */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { Address, Attachment } from '../types.js';
 import { formatAddressList, parseAddressList } from './email.js';
 
@@ -24,6 +24,18 @@ export const HEADER_CAPABILITY = 'ACCP-Capability';
 export const HEADER_CORRELATION = 'ACCP-Correlation';
 export const HEADER_IDEMPOTENCY = 'ACCP-Idempotency-Key';
 export const HEADER_EXPIRES = 'ACCP-Expires';
+export const HEADER_PAYLOAD_DIGEST = 'ACCP-Payload-Digest';
+
+/**
+ * Digest of the decoded envelope bytes, so a receiver can tell whether the
+ * payload it is acting on is the one that was sent. Computed over the decoded
+ * UTF-8 text rather than the encoded part, so that an intermediary re-encoding
+ * base64 or re-wrapping lines — which happens routinely — does not read as
+ * tampering.
+ */
+export function payloadDigest(envelopeText: string): string {
+  return `sha-256=${createHash('sha256').update(envelopeText, 'utf8').digest('base64')}`;
+}
 
 /**
  * Pre-standard header and part names this implementation emitted before ACCP
@@ -149,8 +161,10 @@ export function buildRawMessage(input: RawMessageInput): string {
       ...(input.context === undefined ? {} : { context: input.context }),
       payload: input.structured ?? null,
     };
+    const envelopeText = JSON.stringify(envelope, null, 2);
+    push(HEADER_PAYLOAD_DIGEST, payloadDigest(envelopeText));
     mixedParts.push(
-      part(`${STRUCTURED_MEDIA_TYPE}; charset=UTF-8`, JSON.stringify(envelope, null, 2), [
+      part(`${STRUCTURED_MEDIA_TYPE}; charset=UTF-8`, envelopeText, [
         `Content-Disposition: inline; filename="${STRUCTURED_PART_NAME}"`,
       ]),
     );
@@ -205,6 +219,8 @@ export interface ParsedMessage {
   html: string | null;
   structured: unknown;
   context: unknown;
+  /** Decoded bytes of the envelope part, for digest verification. */
+  structuredRaw: string | null;
   attachments: Attachment[];
 }
 
@@ -229,6 +245,7 @@ export function parseRawMessage(raw: string): ParsedMessage {
     html: null,
     structured: undefined,
     context: undefined,
+    structuredRaw: null,
     attachments: [],
   };
 
@@ -278,8 +295,10 @@ function walkPart(headers: Record<string, string>, body: string, out: ParsedMess
     (mediaType === 'application/json' &&
       (filename === STRUCTURED_PART_NAME || filename === LEGACY_PART_NAME));
   if (isStructured) {
+    const envelopeText = decoded.toString('utf8');
+    out.structuredRaw = envelopeText;
     try {
-      const parsed = JSON.parse(decoded.toString('utf8'));
+      const parsed = JSON.parse(envelopeText);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'accp' in parsed) {
         out.structured = (parsed as Record<string, unknown>).payload;
         out.context = (parsed as Record<string, unknown>).context;

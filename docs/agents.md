@@ -147,6 +147,23 @@ retention may have expired, or the thread may have crossed an organisational
 boundary where nothing was shared. `References` only helps a receiver that
 already has what those identifiers point at. A summary always travels.
 
+**Check `payload_integrity` before acting on a payload.** Mail is rewritten in
+transit routinely — list footers, gateway banners, URL rewriting, MIME
+re-encoding — and DMARC passes on SPF alignment alone, so an authenticated
+sender says nothing about an intact body. Every inbound message carries:
+
+| Field | Meaning |
+|---|---|
+| `payload_integrity: "verified"` | The payload is byte-for-byte what the sender wrote |
+| `payload_integrity: "modified"` | It changed in transit. Usually benign, never assume so |
+| `payload_integrity: "unverified"` | No digest was published; nothing to check against |
+| `auth_results` | SPF, DKIM and DMARC **separately**, not one verdict |
+
+A human reading a mangled message notices. An agent parsing `{"quantity": 4000}`
+where the sender wrote `{"quantity": 40}` does not — which is why this is
+surfaced rather than folded into a single "trusted" flag. See
+[spec §9.2](accp/SPEC.md#92-message-integrity).
+
 **Context is asserted, not proved.** The only authenticated thing about an ACCP
 message is the sending domain. `principal` means "a sender authenticated as
 acme.com claims to act for Acme Ltd" — never treat it as authorisation. Use it

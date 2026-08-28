@@ -49,6 +49,8 @@ export function messageJson(message: Message, options: { includeBody?: boolean }
     base.html = message.html;
     base.structured = message.structured ?? null;
     base.context = message.context ?? null;
+    base.payload_integrity = message.payloadIntegrity ?? null;
+    base.auth_results = message.authResults ?? null;
     base.headers = message.headers;
     base.attachments = message.attachments.map((attachment) => ({
       filename: attachment.filename,

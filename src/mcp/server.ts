@@ -182,7 +182,14 @@ export class AgentMailMcpServer {
       {
         name: 'read_message',
         title: 'Read a message',
-        description: 'Returns one message in full, including its structured JSON payload if it carries one.',
+        description:
+          'Returns one message in full, including its structured payload and ACCP context. ' +
+          'Check `payload_integrity`: `verified` means the payload is what the sender wrote, ' +
+          '`modified` means it changed in transit (a gateway or list server usually, but treat ' +
+          'the contents as unreliable either way), `unverified` means there was no digest to ' +
+          'check. `auth_results` reports SPF, DKIM and DMARC separately — DMARC can pass on SPF ' +
+          'alone while the body has been rewritten, so an authenticated sender does not imply an ' +
+          'intact message.',
         inputSchema: object({ message_id: { type: 'string' } }, ['message_id']),
         handler: async (args, agentId) => this.client.readMessage(agentId, stringArg(args, 'message_id')),
       },

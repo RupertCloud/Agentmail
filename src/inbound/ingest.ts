@@ -6,7 +6,13 @@ import type { Store } from '../store/types.js';
 import type { Agent, Id, Message } from '../types.js';
 import { domainOf, normalizeSubject } from '../util/email.js';
 import { newId, newRfcMessageId } from '../util/ids.js';
-import { HEADER_CONVERSATION, HEADER_HOPS, parseRawMessage } from '../util/mime.js';
+import {
+  HEADER_CONVERSATION,
+  HEADER_HOPS,
+  HEADER_PAYLOAD_DIGEST,
+  parseRawMessage,
+  payloadDigest,
+} from '../util/mime.js';
 
 export type Verdict = 'PASS' | 'FAIL' | 'GRAY' | 'PROCESSING_FAILED' | 'DISABLED';
 
@@ -118,6 +124,12 @@ export class InboundService {
       // ACCP §6.4 C-1/C-2: delivered unmodified, and never inferred when absent.
       structured: parsed.structured,
       context: (parsed.context as Message['context']) ?? null,
+      payloadIntegrity: checkIntegrity(parsed),
+      authResults: {
+        spf: verdicts.spf ?? 'UNKNOWN',
+        dkim: verdicts.dkim ?? 'UNKNOWN',
+        dmarc: verdicts.dmarc ?? 'UNKNOWN',
+      },
       rfcMessageId: parsed.messageId ?? newRfcMessageId(this.config.platformDomain),
       inReplyTo: parsed.inReplyTo,
       references: parsed.references,
@@ -144,6 +156,7 @@ export class InboundService {
       from,
       transport: 'provider',
       spam: verdicts.spam ?? 'UNKNOWN',
+      payload_integrity: message.payloadIntegrity ?? null,
     });
     this.notifier.publish(message);
     return message;
@@ -196,4 +209,20 @@ function conversationKeyFor(parsed: ReturnType<typeof parseRawMessage>): string 
   const declared = parsed.headers[HEADER_CONVERSATION.toLowerCase()];
   if (!declared) return null;
   return `${domainOf(parsed.from[0]?.email ?? '')}:${declared}`;
+}
+
+/**
+ * Compares the received envelope against the digest the sender published.
+ *
+ * A mismatch means the payload was altered between sending and arrival —
+ * usually benignly, by a list server or a security gateway, but the agent has
+ * to be told either way rather than acting on it as though it were intact.
+ */
+function checkIntegrity(
+  parsed: ReturnType<typeof parseRawMessage>,
+): 'verified' | 'modified' | 'unverified' | null {
+  if (parsed.structuredRaw == null) return null;
+  const declared = parsed.headers[HEADER_PAYLOAD_DIGEST.toLowerCase()];
+  if (!declared) return 'unverified';
+  return declared.trim() === payloadDigest(parsed.structuredRaw) ? 'verified' : 'modified';
 }

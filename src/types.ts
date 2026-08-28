@@ -229,6 +229,23 @@ export interface Message {
   /** ACCP context travelling with the payload. Sender-asserted; see AccpContext. */
   context?: AccpContext | null;
 
+  /**
+   * Whether the payload is the one the sender wrote.
+   *
+   * Mail is modified in transit routinely — list footers, gateway banners, URL
+   * rewriting, MIME re-encoding — and DMARC can pass on SPF alignment alone
+   * with DKIM broken, so an authenticated sender says nothing about an intact
+   * body. This records the separate question.
+   *
+   * `verified`   digest present and matching
+   * `modified`   digest present and NOT matching: the payload changed in transit
+   * `unverified` no digest to check against
+   */
+  payloadIntegrity?: 'verified' | 'modified' | 'unverified' | null;
+
+  /** Per-mechanism authentication results, so an agent need not infer them. */
+  authResults?: { spf?: string; dkim?: string; dmarc?: string } | null;
+
   /** RFC 5322 Message-ID, angle brackets included. */
   rfcMessageId: string;
   inReplyTo?: string | null;

@@ -126,6 +126,7 @@ reply MUST set `In-Reply-To` and SHOULD set `References`.
 | `ACCP-Correlation` | An opaque token echoed unchanged in the response, for a sender correlating replies to its own outstanding requests. |
 | `ACCP-Idempotency-Key` | Set by the sender; a receiver that has already acted on this key MUST NOT act again, and SHOULD return its previous response. |
 | `ACCP-Expires` | An RFC 3339 timestamp after which the message is no longer worth acting on. |
+| `ACCP-Payload-Digest` | `sha-256=<base64>` over the decoded bytes of the `application/accp+json` part. REQUIRED when that part is present (§9.2). |
 
 ### 3.3 Conversation identity
 
@@ -525,6 +526,79 @@ Agent identity in ACCP is domain identity: an ACCP message is exactly as
 trustworthy as the claim that it came from `acme.example`. This is a real limit.
 It says nothing about which program at `acme.example` sent it, or whether that
 program was behaving as its operator intended. §10 covers the consequences.
+
+### 9.2 Message integrity
+
+**Authentication is not integrity, and an endpoint MUST NOT infer one from the
+other.**
+
+Mail is modified in transit as a matter of routine, and mostly without malice:
+
+- list servers append footers and rewrite `Subject` and `From`;
+- security gateways rewrite URLs, strip attachments and prepend banners;
+- scanners append notices;
+- MTAs re-encode MIME parts, re-wrap lines, and downgrade 8-bit content.
+
+DKIM signs a canonicalised header set and a body hash, so a *valid DKIM
+signature* does attest that the signed content arrived intact — subject to the
+canonicalisation chosen, and to the `l=` tag, which permits content to be
+appended after the signed prefix.
+
+DMARC does not carry that guarantee. **DMARC passes on SPF alignment alone**,
+which authenticates the envelope sender while saying nothing whatever about the
+body. A message can therefore be fully DMARC-aligned and still have had its
+payload rewritten en route. An agent acting on a structured payload because
+"DMARC passed" is acting on unverified data.
+
+For an agent this matters more than it does for a person. A human reading a
+mangled message notices. An agent parsing `{"quantity": 4000}` where the sender
+wrote `{"quantity": 40}` does not.
+
+#### Requirements
+
+- **I-1** A sender that includes an `application/accp+json` part MUST include an
+  `ACCP-Payload-Digest` header: `sha-256=<base64>`, computed over the **decoded
+  UTF-8 bytes** of that part. Digesting the decoded bytes rather than the
+  encoded part means an intermediary re-encoding base64 or re-wrapping lines
+  does not read as tampering.
+- **I-2** A sender SHOULD include `ACCP-Payload-Digest` in its DKIM signed
+  header set. See the limitation below.
+- **I-3** A receiver MUST verify the digest when present, and MUST make the
+  result available to the agent as one of `verified`, `modified` or
+  `unverified` (no digest to check).
+- **I-4** A receiver MUST NOT silently discard a `modified` message, and MUST
+  NOT present it as intact. Whether to act on it is the agent's decision, taken
+  knowingly.
+- **I-5** A receiver MUST expose per-mechanism authentication results — SPF,
+  DKIM and DMARC separately — rather than a single verdict. An agent cannot
+  distinguish "authenticated and intact" from "authenticated but rewritten" if
+  it is handed one boolean.
+
+#### What the digest does and does not give you
+
+Stated precisely, because the difference decides what may be relied on:
+
+- Against **accidental modification** — the list footer, the gateway rewrite,
+  the re-encoding — the digest is reliable whether or not DKIM covers it. This
+  is the common case by a wide margin.
+- Against **malicious modification**, the digest only helps when it is covered
+  by a valid DKIM signature (I-2). An attacker able to rewrite the body of an
+  unsigned message can rewrite the digest header to match.
+
+So the digest converts silent corruption into a detected condition, and — where
+DKIM covers it — tampering into a detected condition too. It is not an
+end-to-end guarantee. A payload that must be tamper-evident regardless of
+transport needs a signature over the envelope itself (JWS or S/MIME), which
+carries the same key-distribution cost as §12.7 and is not required here.
+
+#### Modification that is expected
+
+Where a message legitimately passes through a rewriting intermediary — a
+mailing list is the ordinary case — the `modified` verdict is correct and not an
+attack. ARC (RFC 8617) exists to let a receiver evaluate such a chain. A
+receiver MAY accept an ARC-vouched modification, but MUST still report the
+payload as `modified`: something other than the sender composed what arrived,
+and the agent is entitled to know that.
 
 ---
 
