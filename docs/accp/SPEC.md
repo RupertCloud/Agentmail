@@ -364,7 +364,50 @@ looks like authorisation invites implementations to treat it as authorisation,
 and that is a straightforward privilege-escalation path across a trust boundary.
 Context is for *deciding well*, not for *deciding who may*.
 
-### 6.3 Requirements
+### 6.3 What class of problem this is
+
+Worth naming, because misnaming it leads to the wrong remedy.
+
+**It is not a consensus problem.** A receiver decides alone: there is no quorum,
+no shared state, and no set of peers that must reach the same verdict. Remove
+every other agent and the problem is unchanged. Reaching for the Byzantine
+Generals Problem (Lamport, Shostak and Pease, 1982) here leads to voting
+endpoints or a shared ledger, which would be a poor fit for a federated
+store-and-forward protocol that deliberately has no central party.
+
+**It is a delegation and attribution problem**, of two well-studied kinds:
+
+- **The confused deputy** (Hardy, 1988). An agent holding authority is induced
+  to exercise it on behalf of a party that should not have it. This is precisely
+  what happens if a receiver grants privilege on an asserted `principal`. The
+  delegation ceiling in §6.1 bounds how long such a chain can get; it says
+  nothing about whether any link in it is legitimate.
+- **The "speaks for" relation** (Lampson, Abadi, Burrows and Wobber,
+  *Authentication in Distributed Systems*, 1992). `principal` together with
+  `delegation.chain` is a speaks-for chain expressed in JSON, without that
+  work's formal semantics and without cryptography.
+
+One aspect does touch Byzantine behaviour: nothing prevents a sender telling one
+receiver it acts for Acme and another that it acts for Globex. Equivocation is
+Byzantine in the strict sense — but it only constitutes a *distributed systems*
+problem where the deceived parties must agree, and here they never do. It is
+fraud, detectable after the fact, and not consensus.
+
+The remedy therefore is not agreement but **attenuable signed credentials** —
+SPKI/SDSI (RFC 2693), macaroons, or W3C Verifiable Credentials — in which the
+principal signs an assertion that the agent speaks for it, the agent attenuates
+and forwards it, and a receiver verifies against the principal's key without
+consulting anyone. This is the direction §12.7 asks about, and its cost is key
+distribution rather than quorum.
+
+The one genuine echo of Lamport is directional: his signed-message variant
+tolerates any number of faulty parties, because signatures remove the ability to
+lie about what someone else said. The same move closes this gap. Note that ACCP
+is not starting from the oral-message case — DKIM and DMARC already authenticate
+the sending *domain* (§9.1). What is missing is authentication one level down,
+of the principal and the chain within an authenticated domain.
+
+### 6.4 Requirements
 
 - **C-1** An endpoint MUST make the received context available to the agent
   unmodified.
@@ -384,7 +427,7 @@ Context is for *deciding well*, not for *deciding who may*.
 An agent that cannot find its counterpart is limited to addresses hardcoded when
 it was built.
 
-### 6.1 Agent card
+### 7.1 Agent card
 
 An endpoint MAY publish a card for an agent, as `application/json`:
 
@@ -404,7 +447,7 @@ An endpoint MAY publish a card for an agent, as `application/json`:
 
 Publication MUST be opt-in per agent.
 
-### 6.2 Resolution
+### 7.2 Resolution
 
 Given an address, a client SHOULD resolve the card by requesting
 `https://<domain>/.well-known/accp/agent?address=<addr-spec>`.
@@ -413,7 +456,7 @@ An endpoint MAY additionally offer a search interface. Search is explicitly not
 part of the core: a queryable index of every agent address is also a harvesting
 surface, and whether to run one is a policy decision, not a protocol one.
 
-### 6.3 Capability tokens
+### 7.3 Capability tokens
 
 `capabilities` is a list of dotted lowercase tokens (`invoice.parse`). They are
 advisory: a sender uses them to choose a recipient, and a receiver MUST still
@@ -473,7 +516,7 @@ A rejected message MUST be recorded with its reason and MUST NOT be delivered.
 Rejection SHOULD be silent to the sender where the policy is `allowlist` or
 `closed`, to avoid confirming that an address exists.
 
-### 8.1 Sender authentication
+### 9.1 Sender authentication
 
 An endpoint MUST evaluate SPF, DKIM and DMARC on inbound messages and MUST make
 the results available to the receiving agent.
@@ -487,7 +530,7 @@ program was behaving as its operator intended. §10 covers the consequences.
 
 ## 10. Security considerations
 
-### 9.1 Inbound content is untrusted input to a model
+### 10.1 Inbound content is untrusted input to a model
 
 An agent reading its mail is reading text written by anyone who can reach its
 address. Prompt injection is not a hypothetical here; it is the expected case.
@@ -506,20 +549,20 @@ consequences be bounded:
 Containment belongs in the credential, not in the agent's judgement. Whatever
 the agent is persuaded to attempt, the credential must not be able to do it.
 
-### 9.2 Loops and amplification
+### 10.2 Loops and amplification
 
 §3.4 and §8 bound automated exchange. Endpoints MUST additionally enforce a
 per-conversation rate ceiling; 30 messages per minute is a reasonable default.
 An agent pair exchanging messages as fast as a datacentre allows will exhaust a
 sending quota and damage a domain's reputation long before a human notices.
 
-### 9.3 A compromised agent is an insider
+### 10.3 A compromised agent is an insider
 
 It holds a valid credential and sends well-formed, authenticated messages.
 Nothing in the envelope detects this. Endpoints MUST provide per-agent sending
 limits and the ability to suspend an agent immediately.
 
-### 9.4 Spam at agent scale
+### 10.4 Spam at agent scale
 
 Automated senders can generate volume no human can. ACCP's admission policies
 (§9) put the decision with the receiver rather than relying on content
@@ -527,7 +570,7 @@ filtering, which is why `verified` and not `open` is the default. Endpoints
 issuing addresses on a shared domain SHOULD apply progressive sending limits to
 new agents: reputation on that domain is a shared resource.
 
-### 9.5 Confidentiality
+### 10.5 Confidentiality
 
 ACCP inherits email's: hop-to-hop TLS where available, nothing end-to-end.
 Payloads containing personal or sensitive data SHOULD be encrypted with S/MIME
@@ -538,7 +581,7 @@ part is encrypted along with the rest of the body.
 
 ## 11. Conformance
 
-### 10.1 Core (required)
+### 11.1 Core (required)
 
 An implementation conforms to **ACCP Core** if it:
 
@@ -558,7 +601,7 @@ An implementation conforms to **ACCP Core** if it:
 Core requires no HTTP API. An implementation that only sends and receives SMTP
 can conform.
 
-### 10.2 Mailbox profile (optional)
+### 11.2 Mailbox profile (optional)
 
 Adds delivery semantics for agents that process messages as work items:
 at-least-once delivery with leases, acknowledgement, and redelivery of a lease
@@ -574,7 +617,7 @@ deploy. A read flag loses work in all three cases. Endpoints implementing this
 profile SHOULD honour `ACCP-Idempotency-Key` (§3.2), since at-least-once
 delivery means a message can arrive twice.
 
-### 10.3 Directory profile (optional)
+### 11.3 Directory profile (optional)
 
 Adds §7.2 resolution at `/.well-known/accp/agent`.
 

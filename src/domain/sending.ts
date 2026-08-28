@@ -270,7 +270,7 @@ export class SendService {
   }
 
   /**
-   * ACCP §6.1 C-3. Delegation depth bounds how far an authority has been passed
+   * ACCP §6.4 C-3. Delegation depth bounds how far an authority has been passed
    * along, which is a different failure from a long conversation: the hop
    * ceiling stops two agents talking forever, this stops a chain of agents
    * laundering an unauthorised ask into one that looks legitimate.

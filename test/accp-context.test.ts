@@ -86,7 +86,7 @@ test('context reaches the recipient agent unmodified over the internal fast path
   );
 
   const [received] = await platform.mailbox.list(seller);
-  assert.deepEqual(received.context, context, 'ACCP §6.3 C-1: delivered unmodified');
+  assert.deepEqual(received.context, context, 'ACCP §6.4 C-1: delivered unmodified');
   assert.equal(provider.sent.length, 0);
 });
 
@@ -140,7 +140,7 @@ test('inbound mail without context does not have one invented for it', async () 
   });
 
   const [received] = await platform.mailbox.list(agent);
-  assert.equal(received.context, null, 'ACCP §6.3 C-2: absent stays absent');
+  assert.equal(received.context, null, 'ACCP §6.4 C-2: absent stays absent');
 });
 
 test('delegation depth is bounded, like the hop ceiling but for authority', async () => {
