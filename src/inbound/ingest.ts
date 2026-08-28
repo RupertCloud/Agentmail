@@ -11,10 +11,12 @@ import {
   HEADER_CONTENT_DIGEST,
   HEADER_CONVERSATION,
   HEADER_HOPS,
+  attachmentsContent,
   contentRoot,
   parseContentDigest,
   parseRawMessage,
   partDigest,
+  type DigestEnvelope,
 } from '../util/mime.js';
 
 export type Verdict = 'PASS' | 'FAIL' | 'GRAY' | 'PROCESSING_FAILED' | 'DISABLED';
@@ -105,6 +107,11 @@ export class InboundService {
   ): Promise<Message> {
     const threadId = await this.resolveThread(agent, parsed);
     const integrity = checkIntegrity(parsed);
+    // §10.6: an already-seen Message-ID is a replay (or at-least-once
+    // redelivery). Flag it so an agent never acts on the same request twice.
+    const isReplay = parsed.messageId
+      ? (await this.store.findByRfcMessageId(agent.accountId, parsed.messageId)) != null
+      : false;
     const hops = Number(parsed.headers[HEADER_HOPS.toLowerCase()] ?? '0');
     const now = new Date().toISOString();
 
@@ -130,11 +137,8 @@ export class InboundService {
       context: (parsed.context as Message['context']) ?? null,
       payloadIntegrity: integrity.payloadIntegrity,
       modifiedParts: integrity.modifiedParts,
-      authResults: {
-        spf: verdicts.spf ?? 'UNKNOWN',
-        dkim: verdicts.dkim ?? 'UNKNOWN',
-        dmarc: verdicts.dmarc ?? 'UNKNOWN',
-      },
+      isReplay,
+      authResults: authResults(verdicts),
       rfcMessageId: parsed.messageId ?? newRfcMessageId(this.config.platformDomain),
       inReplyTo: parsed.inReplyTo,
       references: parsed.references,
@@ -163,6 +167,7 @@ export class InboundService {
       spam: verdicts.spam ?? 'UNKNOWN',
       payload_integrity: message.payloadIntegrity ?? null,
       modified_parts: message.modifiedParts ?? [],
+      replay: message.isReplay ?? false,
     });
     this.notifier.publish(message);
     return message;
@@ -227,47 +232,104 @@ function conversationKeyFor(parsed: ReturnType<typeof parseRawMessage>): string 
  * payload.
  */
 function checkIntegrity(parsed: ReturnType<typeof parseRawMessage>): {
-  payloadIntegrity: 'verified' | 'modified' | 'unverified' | null;
+  payloadIntegrity: 'verified' | 'modified' | 'unverified' | 'digest_missing' | null;
   modifiedParts: string[];
 } {
   const hasPayload = parsed.structuredRaw != null;
-  const declared = parseContentDigest(parsed.headers[HEADER_CONTENT_DIGEST.toLowerCase()]);
-  if (!declared) {
-    return { payloadIntegrity: hasPayload ? 'unverified' : null, modifiedParts: [] };
+
+  // C0: more than one ACCP-Content-Digest is a forge attempt (the parser would
+  // otherwise merge them and prefer the attacker's). Trust none of them.
+  if (parsed.contentDigestCount > 1) {
+    return { payloadIntegrity: hasPayload ? 'digest_missing' : null, modifiedParts: ['duplicate-digest'] };
   }
 
+  const declared = parseContentDigest(parsed.headers[HEADER_CONTENT_DIGEST.toLowerCase()]);
+  if (!declared) {
+    // C3: a 0.2 payload with no digest is a stripped/absent commitment, distinct
+    // from a checkable-but-unbound one. Agents treat digest_missing like modified.
+    return { payloadIntegrity: hasPayload ? 'digest_missing' : null, modifiedParts: [] };
+  }
+  if (!hasPayload) return { payloadIntegrity: null, modifiedParts: [] };
+
+  // C9: an unrecognised algorithm cannot be verified — never report verified.
+  if (declared.alg.toLowerCase() !== 'sha-256') {
+    return { payloadIntegrity: 'unverified', modifiedParts: ['alg'] };
+  }
+  // C4: without a Message-ID the commitment cannot be bound, so it is worthless.
   const messageId = parsed.messageId ?? '';
+  if (!messageId) return { payloadIntegrity: 'unverified', modifiedParts: ['message-id'] };
+
+  // C10: the envelope the sender committed to. A change to From re-derives every
+  // leaf, so a re-enveloped payload fails.
+  const env: DigestEnvelope = {
+    messageId,
+    from: parsed.from[0]?.email ?? '',
+    date: parsed.headers.date ?? '',
+  };
+
   const received: Record<string, string | undefined> = {
     payload: parsed.structuredRaw ?? undefined,
     text: parsed.text ?? undefined,
     html: parsed.html ?? undefined,
+    attachments: attachmentsContent(parsed.attachments),
   };
 
+  // Recompute every leaf from content over the FIXED part set (C1, C2): a part
+  // present in the header but missing from the body, or present in the body but
+  // not committed, both surface as a mismatch instead of being skipped.
   const modifiedParts: string[] = [];
-  const recomputed: Record<string, string> = {};
+  const recomputedLeaves: Record<string, string> = {};
   for (const part of COMMITTED_PARTS) {
-    const claimed = declared.leaves[part];
-    if (claimed === undefined) continue;
+    const declaredLeaf = declared.leaves[part];
     const content = received[part];
-    const actual = content === undefined ? null : partDigest(part, messageId, content);
-    if (actual !== null) recomputed[part] = actual;
-    if (actual !== claimed) modifiedParts.push(part);
+    const recomputed = content === undefined ? undefined : partDigest(part, env, content);
+    if (recomputed !== undefined) recomputedLeaves[part] = recomputed;
+    if (declaredLeaf !== recomputed) modifiedParts.push(part);
   }
 
-  // The root binds the leaf set: a mismatch means parts were substituted,
-  // reordered or dropped even where each surviving leaf still matches.
-  if (contentRoot(messageId, declared.leaves) !== declared.root) {
-    if (!modifiedParts.includes('root')) modifiedParts.push('root');
-  }
+  // Recompute the root from the CONTENT-derived leaves and the envelope, and
+  // compare to what was declared — the check the old code got wrong by
+  // rebuilding the root from the header's own leaves. A mismatch is a set-level
+  // signal (a part added or dropped on both sides under a signed header), so it
+  // is surfaced as a `root` diagnostic — but it does NOT by itself condemn the
+  // payload: a list footer legitimately changes `text`, and claim 2 requires
+  // that not to falsify the intact payload.
+  const rootOk = contentRoot(env, declared.alg, recomputedLeaves) === declared.root;
+  if (!rootOk && !modifiedParts.includes('root')) modifiedParts.push('root');
 
-  if (!hasPayload) return { payloadIntegrity: null, modifiedParts };
-  if (declared.leaves.payload === undefined) {
-    return { payloadIntegrity: 'unverified', modifiedParts };
-  }
-  return {
-    payloadIntegrity: modifiedParts.includes('payload') || modifiedParts.includes('root')
-      ? 'modified'
-      : 'verified',
-    modifiedParts,
-  };
+  // The payload verdict is about the payload bytes, judged by their own
+  // envelope-bound leaf. C10 is still caught: a changed From re-derives that
+  // leaf, so `payload` mismatches.
+  const payloadOk = declared.leaves.payload !== undefined && !modifiedParts.includes('payload');
+  return { payloadIntegrity: payloadOk ? 'verified' : 'modified', modifiedParts };
+}
+
+/**
+ * Per-mechanism authentication, plus two derived signals an agent needs to use
+ * `verified` safely (S1, S2):
+ *
+ * - `tamperEvident` — whether a `verified` digest is actually protected against
+ *   an active attacker. That requires a DKIM signature whose body hash covers
+ *   the message. We do not receive the signed-header list from the provider, so
+ *   this is the best available necessary condition (DKIM pass), never a proof;
+ *   agents.md and spec §9.2 say so.
+ * - `dmarcMethod` — which mechanism carried DMARC. DMARC via SPF alone attests
+ *   nothing about the body, so an agent acting on a payload should require
+ *   `dkim: PASS`, not merely `dmarc: PASS`.
+ */
+function authResults(verdicts: NonNullable<InboundDelivery['verdicts']>): NonNullable<Message['authResults']> {
+  const spf = verdicts.spf ?? 'UNKNOWN';
+  const dkim = verdicts.dkim ?? 'UNKNOWN';
+  const dmarc = verdicts.dmarc ?? 'UNKNOWN';
+  const dmarcMethod =
+    dmarc !== 'PASS'
+      ? 'none'
+      : dkim === 'PASS' && spf === 'PASS'
+        ? 'both'
+        : dkim === 'PASS'
+          ? 'dkim'
+          : spf === 'PASS'
+            ? 'spf'
+            : 'none';
+  return { spf, dkim, dmarc, tamperEvident: dkim === 'PASS', dmarcMethod };
 }

@@ -147,22 +147,33 @@ retention may have expired, or the thread may have crossed an organisational
 boundary where nothing was shared. `References` only helps a receiver that
 already has what those identifiers point at. A summary always travels.
 
-**Check `payload_integrity` before acting on a payload.** Mail is rewritten in
-transit routinely — list footers, gateway banners, URL rewriting, MIME
-re-encoding — and DMARC passes on SPF alignment alone, so an authenticated
-sender says nothing about an intact body. Every inbound message carries:
+**Check `payload_integrity` before acting on a payload — and know what it does
+not promise.** Mail is rewritten in transit routinely (list footers, gateway
+banners, MIME re-encoding), and DMARC passes on SPF alignment alone, so an
+authenticated sender says nothing about an intact body. Every inbound message
+carries:
 
 | Field | Meaning |
 |---|---|
-| `payload_integrity: "verified"` | The payload is byte-for-byte what the sender wrote |
-| `payload_integrity: "modified"` | It changed in transit. Usually benign, never assume so |
-| `payload_integrity: "unverified"` | No digest was published; nothing to check against |
-| `modified_parts` | Exactly which parts changed — `["text"]` is a list footer; `["payload"]` is not |
-| `auth_results` | SPF, DKIM and DMARC **separately**, not one verdict |
+| `payload_integrity: "verified"` | The payload digest matched. **This is tamper-evidence only when `auth_results.tamper_evident` is true** (a DKIM signature covers it). Without that it means "a self-consistent hash arrived" — worth nothing against an active attacker, who computes the same hash. |
+| `payload_integrity: "modified"` | The payload changed in transit. Never act on it as authentic. |
+| `payload_integrity: "digest_missing"` | A 0.2 message with **no digest, or more than one** — a stripped header or a forge attempt, not a benign absence. Treat it like `modified`. |
+| `payload_integrity: "unverified"` | Uncheckable — no `Message-ID` to bind to, or an unrecognised algorithm. |
+| `modified_parts` | Exactly which parts changed — `["text"]` is a list footer; `["payload"]` or `["attachments"]` is not; `["duplicate-digest"]` is an attack. |
+| `auth_results.tamper_evident` | `true` only under `dkim: PASS`. If false, `verified` is not tamper-proof. |
+| `auth_results.dmarc_method` | `dkim` / `spf` / `both` / `none`. **For a payload you act on, require `dkim: PASS`** — `dmarc: PASS` via SPF alone attests nothing about the body. |
+
+The rule in one line: **act on a payload only when `payload_integrity` is
+`verified` AND `auth_results.dkim` is `PASS`.** Anything less is an
+authenticated envelope around unverified bytes.
+
+A `verified` payload still proves nothing about the `context` it carries — the
+digest covers the principal claim's bytes, not its truth. An intact lie is
+intact; see [§6.2](accp/SPEC.md#62-context-is-asserted-not-proved).
 
 A human reading a mangled message notices. An agent parsing `{"quantity": 4000}`
-where the sender wrote `{"quantity": 40}` does not — which is why this is
-surfaced rather than folded into a single "trusted" flag. See
+where the sender wrote `{"quantity": 40}` does not — which is why every part is
+surfaced rather than folded into one "trusted" flag. Full detail in
 [spec §9.2](accp/SPEC.md#92-message-integrity).
 
 **Context is asserted, not proved.** The only authenticated thing about an ACCP

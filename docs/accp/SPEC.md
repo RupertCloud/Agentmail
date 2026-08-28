@@ -567,54 +567,68 @@ wrote `{"quantity": 40}` does not.
 The design borrows three habits from proof systems — commit to parts, bind the
 commitment to its context, separate hash domains — while deliberately not
 borrowing a Merkle tree, whose logarithmic proofs pay off over thousands of
-leaves and a message has three.
+leaves and a message has four. (This is the v2 construction, hardened after the
+adversarial review in `integrity-review.md`. The v1 scheme it replaced had a
+self-referential root check, an unbound sender, and no attachment coverage.)
 
 A sender including an `application/accp+json` part MUST include:
 
 ```
-ACCP-Content-Digest: alg=sha-256; root=<b64>; payload=<b64>; text=<b64>; html=<b64>
+ACCP-Content-Digest: alg=sha-256; root=<b64>; payload=<b64>; text=<b64>; html=<b64>; attachments=<b64>
 ```
 
-- Each **leaf** is `SHA-256("ACCP-part-v1" || 0x00 || part-name || 0x00 ||
-  Message-ID || 0x00 || content)`, over the **decoded UTF-8 bytes** of that
-  part — decoded, so an intermediary re-encoding base64 or re-wrapping lines
-  does not read as tampering. `payload` is REQUIRED when the part is present;
-  `text` and `html` are included when those parts are.
-- The **root** is `SHA-256("ACCP-root-v1" || 0x00 || Message-ID || 0x00 ||`
-  the leaf list in fixed order`)`. It binds the leaf *set*, so parts cannot be
-  substituted, reordered or dropped even where each surviving leaf matches.
+- The committed set is fixed: `payload`, `text`, `html`, `attachments`. A leaf
+  appears only for a part that is present, except `attachments`, whose leaf is
+  always present (an empty leaf still detects an attachment added in transit).
+- Each **leaf** is `SHA-256` over **length-prefixed** fields:
+  `LEAF_LABEL, part-name, Message-ID, From, content`. Each field is an 8-byte
+  big-endian length then its bytes, so no byte inside one field — a NUL
+  included — can be read as a boundary (the v1 `||0x00||` delimiter was not
+  injective). `content` is the **decoded UTF-8 bytes** of the part, so an
+  intermediary re-encoding base64 or re-wrapping lines does not read as
+  tampering. The `attachments` content is the ordered list of each attachment's
+  length-prefixed filename, content-type, and content hash.
+- The **root** is `SHA-256` over length-prefixed
+  `ROOT_LABEL, Message-ID, From, Date, alg,` then each part-name and its leaf in
+  fixed order. It binds the leaf set *and the envelope*, so a part cannot be
+  dropped and a payload cannot be re-enveloped under a different sender.
+- **Why bind `From` and `Date`:** without them a valid payload could be lifted
+  into a message from a different sender and still verify (the confused-deputy
+  shape at the transport layer). Binding the envelope makes each leaf worthless
+  outside its own message *and* its own sender.
 - **Why per part:** a list server appending a footer rewrites `text` and not
-  `payload`. One digest over everything cannot distinguish "the prose grew a
-  footer" from "the quantity changed", and the agent acts on the payload. A
-  receiver reports which parts changed, not merely that something did.
-- **Why bound to `Message-ID`:** an unbound digest is replayable — a valid
-  (digest, payload) pair captured from one message could be spliced into
-  another. Committing to the Message-ID in every hash makes a leaf worthless
-  outside the message it was computed for. This is the same rule Appendix C.4
-  states for proofs, applied to plain hashes.
-- **Why labelled** (`ACCP-part-v1`, `ACCP-root-v1`): domain separation. A
-  digest computed for one role can never be reinterpreted as another, and `v1`
-  versions the construction.
+  `payload`. The receiver reports which parts changed; a changed `text` does not
+  condemn an intact `payload`.
+- **Why labelled and versioned** (`ACCP-leaf-v2`, `ACCP-root-v2`): domain
+  separation, and a version so the construction can change without ambiguity.
 
 #### Requirements
 
 - **I-1** A sender including an `application/accp+json` part MUST publish
-  `ACCP-Content-Digest` as above.
+  `ACCP-Content-Digest` as above, and MUST NOT let a caller supply that header.
 - **I-2** A sender SHOULD include `ACCP-Content-Digest` in its DKIM signed
-  header set. See the limitation below.
-- **I-3** A receiver MUST verify every declared leaf and the root, and MUST
-  make the result available to the agent: `verified`, `modified` or
-  `unverified` for the payload, together with the list of parts that failed.
-- **I-4** A receiver MUST NOT silently discard a `modified` message, and MUST
-  NOT present it as intact. Whether to act on it is the agent's decision, taken
-  knowingly. A message whose `text` failed but whose `payload` verified is
-  reported exactly so.
-- **I-5** A receiver MUST expose per-mechanism authentication results — SPF,
-  DKIM and DMARC separately — rather than a single verdict. An agent cannot
-  distinguish "authenticated and intact" from "authenticated but rewritten" if
-  it is handed one boolean.
-- **I-6** A receiver MAY additionally verify a legacy `ACCP-Payload-Digest`
-  header (a bare `sha-256=<b64>` over the envelope part) from pre-0.2 senders,
+  header set, and SHOULD oversign it so a second instance cannot be prepended.
+  **See the limitation below — on a platform whose signer cannot cover a custom
+  header (SES Easy DKIM among them), this SHOULD is unattainable and `verified`
+  never carries the strong meaning.**
+- **I-3** A receiver MUST verify every declared leaf and recompute the root from
+  the **content-derived** leaves and the envelope — never from the header's own
+  claimed leaves. It MUST report the payload as `verified`, `modified`,
+  `unverified` (uncheckable — no Message-ID, unknown `alg`) or `digest_missing`
+  (a 0.2 payload with no, or more than one, `ACCP-Content-Digest`), together
+  with the list of parts that failed.
+- **I-4** A receiver MUST reject a message carrying more than one
+  `ACCP-Content-Digest` — reporting `digest_missing`, never merging the values.
+  This closes the duplicate-header forge.
+- **I-5** A receiver MUST NOT silently discard a `modified` or `digest_missing`
+  message, and MUST NOT present it as intact. A message whose `text` failed but
+  whose `payload` verified is reported exactly so; the agent decides knowingly.
+- **I-6** A receiver MUST expose per-mechanism authentication results — SPF,
+  DKIM and DMARC separately, plus which mechanism carried DMARC (`dmarc_method`)
+  and whether the digest is DKIM-backed (`tamper_evident`). An agent acting on a
+  payload SHOULD require `dkim: PASS`; `dmarc: PASS` can rest on SPF alone and
+  then attests nothing about the body.
+- **I-7** A receiver MAY additionally verify a legacy pre-0.2 `ACCP-Payload-Digest`,
   and MUST NOT emit one.
 
 #### What the digest does and does not give you
@@ -633,6 +647,12 @@ DKIM covers it — tampering into a detected condition too. It is not an
 end-to-end guarantee. A payload that must be tamper-evident regardless of
 transport needs a signature over the envelope itself (JWS or S/MIME), which
 carries the same key-distribution cost as §12.7 and is not required here.
+
+The digest also covers the `context` bytes — `principal`, `delegation` and the
+rest travel inside the `application/accp+json` part. A `verified` verdict
+therefore proves the sender *stated* those claims intact; it never proves they
+are true (§6.2). An intact lie is intact. A receiver MUST NOT treat a verified
+payload as evidence for its context's authority claims.
 
 #### Modification that is expected
 
@@ -693,6 +713,27 @@ ACCP inherits email's: hop-to-hop TLS where available, nothing end-to-end.
 Payloads containing personal or sensitive data SHOULD be encrypted with S/MIME
 or OpenPGP, which compose with this profile unchanged — the `application/accp+json`
 part is encrypted along with the rest of the body.
+
+### 10.6 Replay
+
+Message integrity (§9.2) binds a payload to its Message-ID and sender, which
+stops a valid (digest, payload) pair being *spliced* into a different message.
+It does nothing against replay of a whole, intact message: a captured,
+DKIM-signed `request` re-injected verbatim re-verifies perfectly, and email is
+at-least-once by nature, so even honest infrastructure redelivers.
+
+Replay is therefore in scope, and the defences are mandatory where a request
+has side effects:
+
+- A receiver MUST deduplicate on `(sender domain, Message-ID)` within its
+  retention window and treat a repeat as a duplicate, not a new instruction
+  (§10.6, and ACCP Core requires it — §11.1).
+- A sender of a side-effecting `request` MUST set `ACCP-Idempotency-Key`, and
+  SHOULD set `ACCP-Expires`. A receiver of such a request bearing neither
+  SHOULD treat the redelivery risk as unbounded and refuse to act twice.
+
+`ACCP-Expires` bounds the window in which a captured message is worth
+replaying; `ACCP-Idempotency-Key` makes a duplicate a no-op even inside it.
 
 ---
 
@@ -786,6 +827,7 @@ ACCP-Conversation: cnv_01J8X2QK7ZP
 ACCP-Hops: 1
 ACCP-Capability: quote.request
 ACCP-Idempotency-Key: quote-4711
+ACCP-Content-Digest: alg=sha-256; root=<b64>; payload=<b64>; text=<b64>; attachments=<b64>
 Content-Type: multipart/alternative; boundary="b1"
 
 --b1
@@ -844,6 +886,7 @@ ACCP-Version: 0.2
 ACCP-Intent: response
 ACCP-Conversation: cnv_01J8X2QK7ZP
 ACCP-Hops: 2
+ACCP-Content-Digest: alg=sha-256; root=<b64>; payload=<b64>; text=<b64>; attachments=<b64>
 Content-Type: multipart/alternative; boundary="b2"
 
 --b2
@@ -971,7 +1014,7 @@ Sketched so that anyone attempting it does not have to rediscover it:
   alongside the envelope, or a `proof` member within `context`.
 - **Binding to this message.** A non-interactive proof detached from its context
   is replayable by anyone who observes it. The proof MUST commit to at least the
-  `Message-ID` and the `ACCP-Payload-Digest` as public inputs, so that a proof
+  `Message-ID` and the `root` of `ACCP-Content-Digest` as public inputs, so that a proof
   captured from one message cannot be attached to another. This is the
   requirement most likely to be missed, and missing it turns a privacy feature
   into an impersonation vector.

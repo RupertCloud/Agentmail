@@ -29,51 +29,103 @@ export const HEADER_CONTENT_DIGEST = 'ACCP-Content-Digest';
 export const HEADER_PAYLOAD_DIGEST = 'ACCP-Payload-Digest';
 
 /**
- * Content commitment, borrowing three ideas from the zk-SNARK toolkit without
- * any of the zero-knowledge:
+ * Content commitment (v2), borrowing machinery from proof systems without any
+ * of the zero-knowledge. Hardened after the adversarial review recorded in
+ * docs/accp/integrity-review.md, which broke the v1 scheme.
  *
- * 1. **Commit to parts separately, not to the message as a whole.** Mail is
- *    legitimately rewritten in transit — a list server appends a footer, a
- *    gateway prepends a banner — and a single digest over everything cannot
- *    distinguish that from someone altering the payload. Per-part leaves let a
+ * 1. **Commit to parts separately.** A list footer rewrites `text`, not
+ *    `payload`. Per-part leaves (payload, text, html, attachments) let a
  *    receiver say "the prose changed, the payload did not".
- * 2. **Bind the commitment to its context.** A proof detached from its public
- *    inputs is replayable; so is a digest. Each leaf commits to the Message-ID,
- *    so a valid (digest, payload) pair cannot be spliced into another message.
- * 3. **Domain separation.** Every hash input carries a label naming its role,
- *    so a digest computed for one purpose cannot be reinterpreted as another.
+ * 2. **Bind the commitment to the envelope.** Each leaf and the root hash the
+ *    Message-ID *and the From address* (the root also the Date), so a
+ *    (digest, payload) pair cannot be spliced into another message or
+ *    re-enveloped under another sender.
+ * 3. **Length-prefix every field.** The pre-image is injective: no byte inside
+ *    a field — a NUL included — can be read as a boundary. v1's `||0x00||`
+ *    delimiter was not injective.
+ * 4. **Domain separation, versioned.** Labels (`ACCP-leaf-v2`, `ACCP-root-v2`)
+ *    stop a digest computed for one role being reused as another.
  *
- * Deliberately *not* copied: a Merkle tree. Its logarithmic proofs pay off over
- * thousands of leaves; a message has three or four, and listing them all is
- * both smaller and simpler. The root is here to bind the set together and give
- * one value to sign, not to enable membership proofs.
+ * Deliberately *not* copied: a Merkle tree. Logarithmic membership proofs pay
+ * off over thousands of leaves; a message has four. The root binds the set and
+ * gives one value to sign — verified by RECOMPUTING it from content, never
+ * (as v1 did) from the header's own claimed leaves.
  */
-const LEAF_LABEL = 'ACCP-part-v1';
-const ROOT_LABEL = 'ACCP-root-v1';
+const LEAF_LABEL = 'ACCP-leaf-v2';
+const ROOT_LABEL = 'ACCP-root-v2';
 
-/** Parts committed to, in a fixed order so the root is reproducible. */
-export const COMMITTED_PARTS = ['payload', 'text', 'html'] as const;
+/**
+ * Content parts committed to, in a fixed order. `attachments` is a single leaf
+ * over the ordered attachment set (C8). The envelope — message-id and sender —
+ * is folded into every leaf and the root (C4, C10) so a payload cannot be
+ * re-enveloped under a different sender and still verify.
+ */
+export const COMMITTED_PARTS = ['payload', 'text', 'html', 'attachments'] as const;
 export type CommittedPart = (typeof COMMITTED_PARTS)[number];
 
 function b64(buffer: Buffer): string {
   return buffer.toString('base64');
 }
 
-/** Leaf digest for one named part, bound to the message it belongs to. */
-export function partDigest(part: string, messageId: string, content: string): string {
+/**
+ * Length-prefixed field, so the hash pre-image is injective: any byte inside a
+ * field — a NUL included — can never be read as a field boundary (fixes C5).
+ * Eight-byte big-endian length, then the UTF-8 bytes.
+ */
+function field(value: string): Buffer {
+  const bytes = Buffer.from(value, 'utf8');
+  const prefix = Buffer.alloc(8);
+  prefix.writeBigUInt64BE(BigInt(bytes.length));
+  return Buffer.concat([prefix, bytes]);
+}
+
+/** The envelope facts every leaf and the root bind to. */
+export interface DigestEnvelope {
+  messageId: string;
+  from: string;
+  date: string;
+}
+
+/** Leaf digest for one named part, bound to the message and its sender. */
+export function partDigest(part: string, env: DigestEnvelope, content: string): string {
   return b64(
     createHash('sha256')
-      .update(`${LEAF_LABEL}\0${part}\0${messageId}\0`, 'utf8')
-      .update(content, 'utf8')
+      .update(field(LEAF_LABEL))
+      .update(field(part))
+      .update(field(env.messageId))
+      .update(field(env.from))
+      .update(field(content))
       .digest(),
   );
 }
 
-/** Binds the leaves together, so parts cannot be substituted or reordered. */
-export function contentRoot(messageId: string, leaves: Record<string, string>): string {
-  const hash = createHash('sha256').update(`${ROOT_LABEL}\0${messageId}\0`, 'utf8');
+/** Canonical bytes the `attachments` leaf commits to: ordered name+type+hash. */
+export function attachmentsContent(attachments: Attachment[] | undefined): string {
+  return (attachments ?? [])
+    .map((a) => {
+      const hash = createHash('sha256').update(a.content, 'base64').digest('base64');
+      return `${field(a.filename).toString('base64')}.${a.contentType}.${hash}`;
+    })
+    .join('|');
+}
+
+/**
+ * Binds the leaf set and the envelope together, giving one value to sign.
+ * Length-prefixed throughout, so no leaf value can forge a boundary.
+ */
+export function contentRoot(
+  env: DigestEnvelope,
+  alg: string,
+  leaves: Record<string, string>,
+): string {
+  const hash = createHash('sha256')
+    .update(field(ROOT_LABEL))
+    .update(field(env.messageId))
+    .update(field(env.from))
+    .update(field(env.date))
+    .update(field(alg));
   for (const part of COMMITTED_PARTS) {
-    hash.update(`${part}=${leaves[part] ?? ''};`, 'utf8');
+    hash.update(field(part)).update(field(leaves[part] ?? ''));
   }
   return b64(hash.digest());
 }
@@ -109,15 +161,16 @@ export function parseContentDigest(header: string | undefined): ContentDigest | 
 
 /** Computes the commitment for a message about to be sent. */
 export function buildContentDigest(
-  messageId: string,
+  env: DigestEnvelope,
   contents: Partial<Record<CommittedPart, string>>,
 ): ContentDigest {
+  const alg = 'sha-256';
   const leaves: Record<string, string> = {};
   for (const part of COMMITTED_PARTS) {
     const content = contents[part];
-    if (content !== undefined) leaves[part] = partDigest(part, messageId, content);
+    if (content !== undefined) leaves[part] = partDigest(part, env, content);
   }
-  return { alg: 'sha-256', root: contentRoot(messageId, leaves), leaves };
+  return { alg, root: contentRoot(env, alg, leaves), leaves };
 }
 
 /**
@@ -199,17 +252,23 @@ export function buildRawMessage(input: RawMessageInput): string {
   const headers: string[] = [];
   const push = (name: string, value: string) => headers.push(foldHeader(name, value));
 
+  const dateString = (input.date ?? new Date()).toUTCString();
   push('From', formatAddressList([input.from]));
   push('To', formatAddressList(input.to));
   if (input.cc?.length) push('Cc', formatAddressList(input.cc));
   if (input.replyTo?.length) push('Reply-To', formatAddressList(input.replyTo));
   push('Subject', encodeHeaderValue(input.subject));
   push('Message-ID', input.messageId);
-  push('Date', (input.date ?? new Date()).toUTCString());
+  push('Date', dateString);
   push('MIME-Version', '1.0');
   if (input.inReplyTo) push('In-Reply-To', input.inReplyTo);
   if (input.references?.length) push('References', input.references.join(' '));
   for (const [name, value] of Object.entries(input.headers ?? {})) {
+    // C7: never let a caller supply a content-digest header — that is the
+    // sender-side half of the duplicate-header forge. The platform computes the
+    // real one below; other ACCP-* headers (Version, Intent, …) are set by the
+    // trusted send path and pass through.
+    if (/^accp-(content|payload)-digest$/i.test(name.trim())) continue;
     push(name, encodeHeaderValue(value));
   }
 
@@ -266,13 +325,17 @@ export function buildRawMessage(input: RawMessageInput): string {
   }
 
   if (structuredText !== undefined) {
+    const env: DigestEnvelope = { messageId: input.messageId, from: input.from.email, date: dateString };
     push(
       HEADER_CONTENT_DIGEST,
       formatContentDigest(
-        buildContentDigest(input.messageId, {
+        buildContentDigest(env, {
           payload: structuredText,
           ...(text ? { text } : {}),
           ...(html ? { html } : {}),
+          // Always commit the attachment set — an empty leaf still detects an
+          // attachment appended in transit (C8).
+          attachments: attachmentsContent(input.attachments),
         }),
       ),
     );
@@ -304,6 +367,8 @@ function wrapParts(bound: string, parts: string[]): string {
 
 export interface ParsedMessage {
   headers: Record<string, string>;
+  /** How many raw ACCP-Content-Digest header lines were present (C0). */
+  contentDigestCount: number;
   from: Address[];
   to: Address[];
   cc: Address[];
@@ -328,8 +393,16 @@ export function parseRawMessage(raw: string): ParsedMessage {
   const body = split === -1 ? '' : normalized.slice(split + 2);
   const headers = parseHeaders(headerBlock);
 
+  // C0: count raw ACCP-Content-Digest header lines *before* folding merges them.
+  // More than one is a forge attempt, and the verifier must refuse to trust any.
+  const unfolded = headerBlock.replace(/\n[ \t]+/g, ' ');
+  const contentDigestCount = unfolded
+    .split('\n')
+    .filter((line) => /^accp-content-digest\s*:/i.test(line)).length;
+
   const result: ParsedMessage = {
     headers,
+    contentDigestCount,
     from: parseAddressList(headers.from),
     to: parseAddressList(headers.to),
     cc: parseAddressList(headers.cc),
@@ -416,8 +489,10 @@ function walkPart(headers: Record<string, string>, body: string, out: ParsedMess
     });
     return;
   }
-  if (mediaType === 'text/plain' && out.text == null) out.text = decoded.toString('utf8').trim();
-  else if (mediaType === 'text/html' && out.html == null) out.html = decoded.toString('utf8').trim();
+  // C6: do NOT trim. The sender commits over the exact decoded bytes; trimming
+  // here would false-report `modified` on any prose with a trailing newline.
+  if (mediaType === 'text/plain' && out.text == null) out.text = decoded.toString('utf8');
+  else if (mediaType === 'text/html' && out.html == null) out.html = decoded.toString('utf8');
 }
 
 function splitOnBoundary(body: string, bound: string): string[] {

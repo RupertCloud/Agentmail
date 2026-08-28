@@ -229,6 +229,9 @@ export interface Message {
   /** ACCP context travelling with the payload. Sender-asserted; see AccpContext. */
   context?: AccpContext | null;
 
+  /** True when this Message-ID was already delivered — a replay or redelivery. */
+  isReplay?: boolean;
+
   /**
    * Whether the payload is the one the sender wrote.
    *
@@ -241,7 +244,7 @@ export interface Message {
    * `modified`   digest present and NOT matching: the payload changed in transit
    * `unverified` no digest to check against
    */
-  payloadIntegrity?: 'verified' | 'modified' | 'unverified' | null;
+  payloadIntegrity?: 'verified' | 'modified' | 'unverified' | 'digest_missing' | null;
 
   /**
    * Which committed parts failed verification. A message may legitimately have
@@ -250,7 +253,15 @@ export interface Message {
   modifiedParts?: string[];
 
   /** Per-mechanism authentication results, so an agent need not infer them. */
-  authResults?: { spf?: string; dkim?: string; dmarc?: string } | null;
+  authResults?: {
+    spf?: string;
+    dkim?: string;
+    dmarc?: string;
+    /** True only under DKIM pass — a necessary, not sufficient, tamper signal. */
+    tamperEvident?: boolean;
+    /** Which mechanism carried DMARC: `dkim`/`spf`/`both`/`none`. */
+    dmarcMethod?: string;
+  } | null;
 
   /** RFC 5322 Message-ID, angle brackets included. */
   rfcMessageId: string;

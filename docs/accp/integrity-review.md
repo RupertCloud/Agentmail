@@ -5,20 +5,34 @@ A record of trying to break the `ACCP-Content-Digest` message-integrity scheme
 security claim is worth exactly as much as the attacks it survived, and a reader
 deciding whether to rely on `payload_integrity: verified` deserves to see them.
 
-**Status: findings frozen; fixes pending.** Author attack plus all three
-independent red-team passes (construction, implementation, threat-model claims)
-are complete and every finding verified against the code before acceptance.
-Fixes are applied in one reconciled pass, so nothing is patched piecemeal.
+**Status: FIXED.** All three red-team passes plus the author attack are
+complete, every finding verified against built code, and all 16 addressed in the
+v2 commitment scheme. 79 tests pass, with a dedicated test per fixed attack
+(C0–C10, S1/S2, S3). The findings below are kept as the record of what was
+broken and how it was closed.
 
-Headline: **16 confirmed defects — 10 in code, 6 in the spec/guidance**,
-including one **critical in-transit payload forge**. The central claim — that a
-receiver can tell whether the payload it acts on is what the sender wrote, and
-cannot be fooled — is **false as implemented.** The two load-bearing guarantees
-the scheme advertises (the root binds the leaf set; each leaf is bound to the
-Message-ID) are both not delivered. What actually survives is the per-leaf,
-domain-separated comparison — and only to the strength of whatever DKIM covers
-the header, which the spec makes optional and this platform's SES Easy DKIM
-cannot provide at all.
+Headline was: **16 confirmed defects — 10 in code, 6 in the spec/guidance**,
+including one **critical in-transit payload forge**. The v1 scheme's two
+advertised guarantees (the root binds the leaf set; each leaf binds the
+Message-ID) were both undelivered, and on this platform `verified` could never
+mean tamper-evidence because SES Easy DKIM cannot sign the header.
+
+**What the fix changed (v2):** the root is recomputed from *content*, never from
+the header's own leaves; every leaf and the root bind the envelope (From, Date)
+as well as the Message-ID; fields are length-prefixed so the pre-image is
+injective; attachments are committed; a duplicate `ACCP-Content-Digest` is
+refused as `digest_missing`; a stripped digest is `digest_missing`, not the
+softer `unverified`; an empty Message-ID or unknown `alg` is `unverified`; the
+sender refuses a caller-supplied digest header and no longer trims prose
+asymmetrically; the receiver exposes `tamper_evident` and `dmarc_method`; a
+replayed Message-ID is flagged; and the spec now states the DKIM dependency, the
+`dkim: PASS` rule, the replay threat (§10.6), and fixes Appendix A and C.4.
+
+The one limitation that **cannot** be closed in code is unchanged: against an
+active attacker, `verified` is tamper-evidence only under a DKIM signature
+covering the header (`tamper_evident: true`). On SES Easy DKIM that is
+unreachable, so the guidance is now explicit — require `dkim: PASS`, and read a
+bare `verified` as "a self-consistent hash arrived".
 
 > **A note on method.** The critical forge (C0) was reported by the
 > implementation red-teamer and my *first* attempt to reproduce it independently
