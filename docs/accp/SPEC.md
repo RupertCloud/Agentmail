@@ -317,6 +317,14 @@ has an address at Acme cannot make a commercial decision.
 **`delegation`** — the chain from the originating party to this sender, and its
 depth. A request that reaches an agent four hops from the human who wanted it is
 a different proposition from one hop, and receivers SHOULD be able to say so.
+
+> **Disclosure hazard.** `chain` names internal parties. An agent polling six
+> suppliers for a quote tells all six who inside the company initiated the
+> request and what its internal agent topology looks like — to five parties who
+> will not win the business, and possibly to a competitor. Senders SHOULD
+> default to `depth` alone and include `chain` only where a receiver
+> demonstrably needs it. Appendix C sketches what proving properties of the
+> chain without disclosing it would take.
 Endpoints SHOULD enforce a maximum delegation depth; this bounds request
 laundering, where a chain of agents is used to launder an unauthorised ask into
 one that looks legitimate. It is a distinct guard from the hop ceiling in §3.4:
@@ -721,6 +729,8 @@ Adds §7.2 resolution at `/.well-known/accp/agent`.
    than proved, which limits what it can be used for. A signed assertion — the
    sending domain vouching for a principal — would lift that limit, at the cost
    of a key distribution problem the protocol has so far avoided. Worth it?
+   Appendix C considers the zero-knowledge form of the same question, where the
+   interesting gain is not proof but non-disclosure.
 
 ---
 
@@ -846,3 +856,109 @@ Were this pursued as a standard, registration would be required for:
   — specification required rather than standards action.
 
 None of this has been done. This document is a draft for discussion.
+
+---
+
+## Appendix C — Zero-knowledge extensions (non-normative)
+
+Nothing in this appendix is required, and none of it is implemented. It exists
+because the question "could zero-knowledge proofs help here" has a real answer
+in two places and a clearly negative one in a third, and the negative case is
+the one most likely to be got wrong.
+
+### C.1 Where they do not help
+
+**Not for message integrity (§9.2).** A hash plus a signature is the correct
+tool and a proof system is strictly worse for it: more moving parts, a proving
+step, and in some constructions a trusted setup, in exchange for nothing a
+signature does not already give. A SNARK proving "I know a preimage of this
+digest" is a more expensive way to publish the digest. If §9.2's limitation is
+to be closed, it is closed by signing the envelope — JWS or S/MIME — not by
+proving anything in zero knowledge.
+
+**Not for succinctness.** Compressing an *n*-link delegation chain into one
+constant-size proof is a real property of these systems, and worth nothing here:
+§6.1 caps depth at a single digit, and verifying five signatures takes
+microseconds. Succinctness earns its keep at thousands of links, not five.
+
+**Not for bootstrapping trust.** This is the misconception worth stating
+plainly. A proof establishes that a statement about a witness holds; it does not
+establish who was entitled to make the statement. Someone must still issue the
+credential asserting that Acme Ltd is Acme Ltd. Zero knowledge changes *what is
+revealed when a credential is presented* — it does not remove the issuer, and it
+does not answer §6.3's attribution problem on its own.
+
+### C.2 Where they do help
+
+Both cases are disclosure problems, not integrity problems.
+
+**Selective disclosure of a principal.** An agent may need to prove a property
+of the party it acts for without naming it: that its principal is an accredited
+buyer, holds a trade licence in a jurisdiction, or is authorised up to a
+spending limit — without disclosing which organisation, which licence, or the
+exact limit. An agent polling several suppliers currently reveals its identity
+to all of them, including the ones that will not win the work.
+
+For attribute disclosure specifically, **BBS+ signatures are usually the better
+instrument than a general-purpose SNARK**: an issuer signs a set of attributes
+once, and the holder discloses any subset with an unlinkable proof. Lighter,
+no circuit to write or audit, and a smaller trusted-computing base.
+
+**Delegation-chain privacy.** The strongest fit, and it addresses a leak this
+specification already has (§6.1). A proof could establish "this request descends
+from a valid authority chain, rooted at acme.example, of depth at most 5" while
+disclosing none of the intermediate parties. That is a statement about a
+witness the sender holds and the receiver has no business seeing, which is
+precisely the shape these systems are for.
+
+**Predicate proofs over payloads.** In a negotiation, proving "my bid is below
+your published ceiling" or "this invoice totals under 10,000" without revealing
+the figure. Genuinely useful, and further off than the other two.
+
+### C.3 Why email is an unusually good carrier
+
+Worth noting because it cuts against the usual objection. Proving is expensive
+— tens of milliseconds to seconds — which is disqualifying on a synchronous
+request path where it lands directly in a user's latency budget. ACCP is
+store-and-forward, and delivery already takes seconds to minutes. A proving step
+disappears into that.
+
+Proof size is likewise a non-issue in a medium that routinely carries megabyte
+attachments: a Groth16 proof is a few hundred bytes, and even a transparent
+STARK at tens or hundreds of kilobytes is unremarkable as a MIME part. The
+constraints that make zero-knowledge awkward elsewhere mostly do not bind here.
+
+### C.4 What such an extension would have to specify
+
+Sketched so that anyone attempting it does not have to rediscover it:
+
+- **A part or member to carry the proof** — `application/accp-proof+json`
+  alongside the envelope, or a `proof` member within `context`.
+- **Binding to this message.** A non-interactive proof detached from its context
+  is replayable by anyone who observes it. The proof MUST commit to at least the
+  `Message-ID` and the `ACCP-Payload-Digest` as public inputs, so that a proof
+  captured from one message cannot be attached to another. This is the
+  requirement most likely to be missed, and missing it turns a privacy feature
+  into an impersonation vector.
+- **How a verifier obtains the verifying key and the issuer's key**, which is
+  the same key-distribution problem as §12.7 in different clothing — moved, not
+  removed.
+- **A statement of what the proof does not cover.** A proof about a principal
+  says nothing about payload integrity, and vice versa; §9.2's separation of
+  authentication from integrity applies with equal force to proofs.
+- **Failure semantics.** An unverifiable proof MUST be reported like a
+  `modified` payload (§9.2, I-4): surfaced to the agent, never silently
+  discarded and never presented as valid.
+
+### C.5 Recommendation
+
+Do not adopt this now. The two useful cases both depend on a credential-issuing
+ecosystem that does not exist for this market, and a protocol whose adoption
+requires both ends to run a proving system will not be adopted. The cheaper
+version of the same benefit — sending `depth` without `chain` — is available
+today and costs nothing.
+
+Revisit if agent-to-agent commerce reaches the point where identity disclosure
+during price discovery is a live commercial problem. That is the condition under
+which the cost becomes worth paying, and it is a business condition rather than
+a technical one.
