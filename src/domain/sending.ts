@@ -3,6 +3,7 @@ import { badRequest, forbidden, rateLimited, unprocessable } from '../errors.js'
 import type { Queue } from '../queue/types.js';
 import type { Store } from '../store/types.js';
 import type {
+  AccpContext,
   Account,
   Address,
   Agent,
@@ -57,6 +58,8 @@ export interface SendEmailInput {
   attachments?: Attachment[];
   /** Machine-readable payload for agent recipients. */
   structured?: unknown;
+  /** ACCP context travelling with the payload (spec §6). */
+  context?: AccpContext;
   templateId?: Id;
   variables?: Record<string, unknown>;
   tags?: Record<string, string>;
@@ -105,6 +108,7 @@ export class SendService {
       if (existing) return { message: existing, internal: [], skipped: [] };
     }
 
+    if (input.context) this.assertDelegationBudget(input.context);
     const agent = await this.resolveSendingAgent(account, input, sender);
     const from = this.resolveFrom(input, agent);
     await this.assertSenderAllowed(account, from, agent);
@@ -262,6 +266,26 @@ export class SendService {
     if (!verified) throw forbidden(`Domain ${domain} is not registered on this account.`);
     if (verified.status !== 'verified') {
       throw forbidden(`Domain ${domain} is not verified yet, so it cannot send (FR-2.5).`);
+    }
+  }
+
+  /**
+   * ACCP §6.1 C-3. Delegation depth bounds how far an authority has been passed
+   * along, which is a different failure from a long conversation: the hop
+   * ceiling stops two agents talking forever, this stops a chain of agents
+   * laundering an unauthorised ask into one that looks legitimate.
+   */
+  private assertDelegationBudget(context: AccpContext): void {
+    const depth = context.delegation?.depth;
+    if (depth === undefined) return;
+    if (!Number.isInteger(depth) || depth < 0) {
+      throw badRequest('`context.delegation.depth` must be a non-negative integer.', 'context');
+    }
+    if (depth > this.config.maxDelegationDepth) {
+      throw unprocessable(
+        `Delegation depth ${depth} exceeds the maximum of ${this.config.maxDelegationDepth}.`,
+        'context',
+      );
     }
   }
 
@@ -434,6 +458,7 @@ export class SendService {
       headers,
       attachments: parts.attachments,
       structured: parts.input.structured,
+      context: parts.input.context ?? null,
       rfcMessageId: newRfcMessageId(this.config.platformDomain),
       inReplyTo: parts.parent?.rfcMessageId ?? parts.input.inReplyTo ?? null,
       references: parts.parent ? [...parts.parent.references, parts.parent.rfcMessageId] : [],

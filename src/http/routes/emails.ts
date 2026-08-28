@@ -30,6 +30,7 @@ export function toSendInput(body: Record<string, unknown>): SendEmailInput {
     headers: optionalObject(body, 'headers') as Record<string, string> | undefined,
     attachments,
     structured: body.structured,
+    context: optionalObject(body, 'context') as SendEmailInput['context'],
     templateId: optionalString(body, 'template_id'),
     variables: optionalObject(body, 'variables'),
     tags: optionalObject(body, 'tags') as Record<string, string> | undefined,

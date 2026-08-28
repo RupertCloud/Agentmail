@@ -118,6 +118,46 @@ On the wire this is [ACCP](accp/SPEC.md): the payload travels as an
 `ACCP-Version`, `ACCP-Intent`, `ACCP-Conversation` and `ACCP-Hops`. Any
 ACCP-conformant peer understands it, on this platform or not.
 
+### Context
+
+`structured` says *what* you are asking. `context` says everything the
+recipient needs in order to act on it — and a recipient across a trust boundary
+starts with nothing:
+
+```bash
+curl -sX POST localhost:8080/v1/emails \
+  -H "authorization: Bearer $AGENT_KEY" -H 'content-type: application/json' \
+  -d '{
+        "to": ["seller@widgets.example"],
+        "subject": "Quote request",
+        "structured": {"sku": "WIDGET-1", "quantity": 40},
+        "context": {
+          "principal": {"type": "organization", "id": "acme.com", "display_name": "Acme Ltd"},
+          "delegation": {"depth": 2, "chain": ["person:ada@acme.com", "agent:buyer@acme.com"]},
+          "summary": "Ada needs 40 units in Kampala by 5 September. Two suppliers already missed the date, so the date is the binding constraint.",
+          "expects": {"reply_by": "2026-09-01T00:00:00Z", "format": "structured"},
+          "constraints": {"confidential": true, "do_not_train": true}
+        }
+      }'
+```
+
+**`summary` is the one that earns its place.** The recipient may not hold the
+earlier messages at all — it may have joined the conversation late, its
+retention may have expired, or the thread may have crossed an organisational
+boundary where nothing was shared. `References` only helps a receiver that
+already has what those identifiers point at. A summary always travels.
+
+**Context is asserted, not proved.** The only authenticated thing about an ACCP
+message is the sending domain. `principal` means "a sender authenticated as
+acme.com claims to act for Acme Ltd" — never treat it as authorisation. Use it
+to decide *well*, never to decide *who may*; see
+[spec §6.2](accp/SPEC.md#62-context-is-asserted-not-proved).
+
+Delegation depth is bounded like the hop counter, and for a related reason: hops
+stop two agents talking forever, depth stops a chain of agents laundering an
+unauthorised ask into one that looks legitimate. The ceiling is
+`AGENTMAIL_MAX_DELEGATION_DEPTH`, default 5.
+
 - **Internal delivery** preserves it exactly.
 - **External delivery** carries it as an `application/json` MIME part named
   `agentmail.json`, recovered automatically on receipt. It survives ordinary

@@ -150,6 +150,44 @@ export type MessageStatus =
 /** Mailbox lifecycle for inbound messages. Mirrors a lease queue, not a folder. */
 export type MailboxState = 'unread' | 'claimed' | 'acked' | 'archived';
 
+/**
+ * ACCP context — what the recipient needs in order to act on a message
+ * (docs/accp/SPEC.md §6). Every member is asserted by the sender and proved by
+ * nothing but the sending domain's DKIM signature, so it informs a decision and
+ * never authorises one.
+ */
+export interface AccpContext {
+  /** The party the sending agent acts for, as distinct from the agent itself. */
+  principal?: {
+    type: 'organization' | 'person' | 'agent';
+    id: string;
+    display_name?: string;
+  };
+  /** How far the authority behind this request has been passed along. */
+  delegation?: {
+    depth: number;
+    chain?: string[];
+  };
+  /** The conversation so far, in prose, for a recipient that lacks the thread. */
+  summary?: string;
+  expects?: {
+    reply_by?: string;
+    format?: 'structured' | 'prose';
+    schema?: string;
+  };
+  /** Handling rules the sender asks for. Advisory: nothing enforces them. */
+  constraints?: {
+    confidential?: boolean;
+    do_not_forward?: boolean;
+    do_not_train?: boolean;
+    retain_until?: string;
+  };
+  provenance?: {
+    generated_by?: 'model' | 'human' | 'rule';
+    human_reviewed?: boolean;
+  };
+}
+
 export interface Attachment {
   filename: string;
   contentType: string;
@@ -184,9 +222,12 @@ export interface Message {
 
   /**
    * Machine-readable payload for agent-to-agent work. Survives external
-   * transport as an `application/json` part named `agentmail.json`.
+   * transport inside the `application/accp+json` part.
    */
   structured?: unknown;
+
+  /** ACCP context travelling with the payload. Sender-asserted; see AccpContext. */
+  context?: AccpContext | null;
 
   /** RFC 5322 Message-ID, angle brackets included. */
   rfcMessageId: string;

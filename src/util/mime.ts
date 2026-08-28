@@ -11,7 +11,7 @@ import { formatAddressList, parseAddressList } from './email.js';
 
 /* ACCP wire constants — see docs/accp/SPEC.md. Header names carry no `X-`
  * prefix, per RFC 6648. */
-export const ACCP_VERSION = '0.1';
+export const ACCP_VERSION = '0.2';
 export const STRUCTURED_PART_NAME = 'accp.json';
 export const STRUCTURED_MEDIA_TYPE = 'application/accp+json';
 
@@ -48,6 +48,7 @@ export interface RawMessageInput {
   headers?: Record<string, string>;
   attachments?: Attachment[];
   structured?: unknown;
+  context?: unknown;
   messageId: string;
   inReplyTo?: string | null;
   references?: string[];
@@ -140,9 +141,16 @@ export function buildRawMessage(input: RawMessageInput): string {
   }
 
   const mixedParts: string[] = [];
-  if (input.structured !== undefined) {
+  if (input.structured !== undefined || input.context !== undefined) {
+    // ACCP §5.1: `accp` marks the part as enveloped. Its absence is how a
+    // receiver recognises a 0.1 part, which carried the payload bare.
+    const envelope = {
+      accp: ACCP_VERSION,
+      ...(input.context === undefined ? {} : { context: input.context }),
+      payload: input.structured ?? null,
+    };
     mixedParts.push(
-      part(`${STRUCTURED_MEDIA_TYPE}; charset=UTF-8`, JSON.stringify(input.structured, null, 2), [
+      part(`${STRUCTURED_MEDIA_TYPE}; charset=UTF-8`, JSON.stringify(envelope, null, 2), [
         `Content-Disposition: inline; filename="${STRUCTURED_PART_NAME}"`,
       ]),
     );
@@ -196,6 +204,7 @@ export interface ParsedMessage {
   text: string | null;
   html: string | null;
   structured: unknown;
+  context: unknown;
   attachments: Attachment[];
 }
 
@@ -219,6 +228,7 @@ export function parseRawMessage(raw: string): ParsedMessage {
     text: null,
     html: null,
     structured: undefined,
+    context: undefined,
     attachments: [],
   };
 
@@ -269,7 +279,14 @@ function walkPart(headers: Record<string, string>, body: string, out: ParsedMess
       (filename === STRUCTURED_PART_NAME || filename === LEGACY_PART_NAME));
   if (isStructured) {
     try {
-      out.structured = JSON.parse(decoded.toString('utf8'));
+      const parsed = JSON.parse(decoded.toString('utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'accp' in parsed) {
+        out.structured = (parsed as Record<string, unknown>).payload;
+        out.context = (parsed as Record<string, unknown>).context;
+      } else {
+        // ACCP 0.1: the part was the payload itself, and carried no context.
+        out.structured = parsed;
+      }
     } catch {
       out.structured = undefined;
     }

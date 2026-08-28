@@ -222,6 +222,14 @@ export class AgentMailMcpServer {
             text: { type: 'string', description: 'Plain-text body for a human reader.' },
             html: { type: 'string' },
             structured: { type: 'object', description: 'Machine-readable payload for an agent recipient.' },
+            context: {
+              type: 'object',
+              description:
+                'ACCP context: who you act for (principal), the conversation so far (summary), ' +
+                'what reply you expect (expects), and handling rules (constraints). The recipient ' +
+                'may not hold the earlier messages, so a summary is often what makes the request ' +
+                'actionable.',
+            },
             in_reply_to: { type: 'string', description: 'Message-ID being answered, to stay in thread.' },
           },
           ['to'],
@@ -233,6 +241,7 @@ export class AgentMailMcpServer {
             text: args.text ? String(args.text) : undefined,
             html: args.html ? String(args.html) : undefined,
             structured: args.structured,
+            context: args.context,
             in_reply_to: args.in_reply_to ? String(args.in_reply_to) : undefined,
           }),
       },
@@ -246,6 +255,7 @@ export class AgentMailMcpServer {
             text: { type: 'string' },
             html: { type: 'string' },
             structured: { type: 'object' },
+            context: { type: 'object', description: 'ACCP context to carry with the reply.' },
             subject: { type: 'string' },
           },
           ['message_id'],
@@ -255,6 +265,7 @@ export class AgentMailMcpServer {
             text: args.text,
             html: args.html,
             structured: args.structured,
+            context: args.context,
             subject: args.subject,
           }),
       },

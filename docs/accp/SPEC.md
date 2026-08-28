@@ -1,6 +1,6 @@
 # Agent Communication Context Protocol (ACCP)
 
-**Version 0.1 (draft)** · Status: for discussion · Not yet submitted to any
+**Version 0.2 (draft)** · Status: for discussion · Not yet submitted to any
 standards body
 
 ---
@@ -13,8 +13,9 @@ structured messages with one another across organisational boundaries.
 It is not a new transport. ACCP is a **profile over RFC 5322 and MIME** — the
 message format the world's email already speaks — adding the small number of
 things agent-to-agent traffic needs and ordinary mail lacks: a machine-readable
-payload with a defined media type, correlation across a conversation, declared
-intent, capability discovery, and mandatory loop control.
+payload with a defined media type, **the context a recipient needs in order to
+act on it** (§6), correlation across a conversation, declared intent, capability
+discovery, and mandatory loop control.
 
 A conformant ACCP message is a valid email. It reaches an agent through the
 existing federated mail system, and a human can read it in an ordinary mail
@@ -108,7 +109,7 @@ below. Header field names follow RFC 6648: no `X-` prefix.
 
 | Header | Value |
 |---|---|
-| `ACCP-Version` | The protocol version. `0.1` for this document. |
+| `ACCP-Version` | The protocol version. `0.2` for this document. |
 | `ACCP-Intent` | One of the intents in §4. |
 | `ACCP-Conversation` | An opaque token, globally unique at origin, identifying the conversation. |
 | `ACCP-Hops` | A non-negative integer: how many agent-generated messages precede this one in the conversation, plus one. |
@@ -121,7 +122,7 @@ reply MUST set `In-Reply-To` and SHOULD set `References`.
 | Header | Value |
 |---|---|
 | `ACCP-Agent` | The sending agent's canonical address, when it differs from `From` (for example when sent through a shared relay). |
-| `ACCP-Capability` | The capability token (§6) this message invokes. |
+| `ACCP-Capability` | The capability token (§7) this message invokes. |
 | `ACCP-Correlation` | An opaque token echoed unchanged in the response, for a sender correlating replies to its own outstanding requests. |
 | `ACCP-Idempotency-Key` | Set by the sender; a receiver that has already acted on this key MUST NOT act again, and SHOULD return its previous response. |
 | `ACCP-Expires` | An RFC 3339 timestamp after which the message is no longer worth acting on. |
@@ -172,7 +173,7 @@ prioritise before parsing the payload.
 | `request` | Asking the recipient to do something or answer something | Yes |
 | `response` | Answering a prior `request` | No |
 | `notify` | Informing, with no action required | No |
-| `error` | Reporting that a prior message could not be handled (§7) | No |
+| `error` | Reporting that a prior message could not be handled (§8) | No |
 | `ack` | Confirming receipt where work will take time | No |
 
 A `response`, `error` or `ack` MUST set `In-Reply-To` to the `Message-ID` of the
@@ -189,10 +190,30 @@ subset was always about this size.
 
 ## 5. Payload
 
-### 5.1 Media type
+### 5.1 Media type and envelope
 
 Structured content MUST be carried in a MIME part with media type
 `application/accp+json`, encoded as UTF-8 JSON.
+
+From version 0.2 that part is an envelope with three members:
+
+```json
+{
+  "accp": "0.2",
+  "context": { },
+  "payload": { }
+}
+```
+
+- `accp` — the envelope version. Its presence is what distinguishes an
+  enveloped part from a 0.1 part, which carried the domain payload bare.
+- `context` — what the recipient needs in order to act (§6). OPTIONAL, but
+  see §6.1 for when it stops being optional in practice.
+- `payload` — the domain content, whose structure is a matter for the two
+  agents (§5.3).
+
+A receiver encountering a part with no `accp` member MUST treat the whole object
+as the payload, with no context. That is the 0.1 format, and it stays readable.
 
 The part SHOULD carry `Content-Disposition: inline; filename="accp.json"`, so
 that mail infrastructure treats it as content rather than an attachment, and so
@@ -220,21 +241,145 @@ of the payload rather than omit the part.
 
 ### 5.3 Payload schema
 
-ACCP standardises the **envelope**, not the ontology. The payload's internal
-structure is a matter for the two agents and their domain.
+ACCP standardises the **envelope and the context**, not the ontology. The
+payload's internal structure is a matter for the two agents and their domain.
 
 A payload SHOULD be a JSON object. It MAY carry a `$schema` member naming a JSON
 Schema the sender claims to conform to. Receivers MUST NOT require it.
 
 This is a deliberate limit. Attempts to standardise a universal
 agent-interaction ontology have consistently failed; what survives is a shared
-envelope with domain-specific contents. §11 discusses what a capability
+envelope with domain-specific contents. §12 discusses what a capability
 registry would need to look like if the ecosystem later wants stronger
 guarantees.
 
 ---
 
-## 6. Discovery
+## 6. Context
+
+This is the section the protocol is named for, and the reason a bare envelope is
+not enough.
+
+A message crossing a trust boundary arrives at an agent that knows nothing about
+where it came from. The payload says *what* is being asked. It does not say who
+is really asking, on whose authority, what has already happened, what the sender
+expects back, or how the contents may be handled. A human reading an email
+recovers most of that from the thread, the signature block and the relationship.
+An agent has none of it.
+
+MCP assembles context for a model from the tools and data on its own side of the
+boundary. ACCP carries context **across** the boundary, so the receiving agent
+can assemble its own. Same word, orthogonal axis.
+
+### 6.1 The context object
+
+Every member is OPTIONAL. An empty context is valid, and a `notify` between two
+agents that already share state may legitimately need none. But an agent
+receiving a `request` from a stranger with no context has only a payload and a
+domain name, and will usually have to refuse or ask.
+
+```json
+{
+  "principal": {
+    "type": "organization",
+    "id": "acme.example",
+    "display_name": "Acme Ltd"
+  },
+  "delegation": {
+    "depth": 2,
+    "chain": ["person:ada@acme.example", "agent:buyer@acme.example"]
+  },
+  "summary": "Ada asked for 40 units of WIDGET-1 delivered to Kampala. This is the third supplier approached; the first two could not meet the date.",
+  "expects": {
+    "reply_by": "2026-09-01T00:00:00Z",
+    "format": "structured",
+    "schema": "https://acme.example/schemas/quote.json"
+  },
+  "constraints": {
+    "confidential": true,
+    "do_not_forward": true,
+    "do_not_train": true,
+    "retain_until": "2026-12-01T00:00:00Z"
+  },
+  "provenance": {
+    "generated_by": "model",
+    "human_reviewed": false
+  }
+}
+```
+
+**`principal`** — on whose behalf the agent is acting. The `From` address
+identifies the *agent*; this identifies the party it answers to. An agent that
+cannot tell whether it is dealing with Acme Ltd or with a program that merely
+has an address at Acme cannot make a commercial decision.
+
+**`delegation`** — the chain from the originating party to this sender, and its
+depth. A request that reaches an agent four hops from the human who wanted it is
+a different proposition from one hop, and receivers SHOULD be able to say so.
+Endpoints SHOULD enforce a maximum delegation depth; this bounds request
+laundering, where a chain of agents is used to launder an unauthorised ask into
+one that looks legitimate. It is a distinct guard from the hop ceiling in §3.4:
+hops bound how long a conversation runs, depth bounds how far an authority has
+been passed along.
+
+**`summary`** — the conversation so far, in prose, as the sender understands it.
+This is the most useful member and the least obvious. A receiver may not hold
+the earlier messages at all: it may have been added to the conversation partway
+through, its retention window may have expired, or the thread may have crossed
+an organisational boundary where nothing was shared. Reconstructing from
+`References` only works when the receiver already has what those identifiers
+point at. A summary always travels.
+
+**`expects`** — the shape of the reply the sender is waiting on: a deadline, a
+format, optionally a schema. Without it a receiver guesses, and two agents can
+spend several round trips discovering they wanted different things.
+
+**`constraints`** — handling rules that travel with the message: confidentiality,
+forwarding, retention, whether the contents may be used as training data.
+
+**`provenance`** — whether the message was composed by a model, and whether a
+human reviewed it before it was sent.
+
+### 6.2 Context is asserted, not proved
+
+**Everything in the context object is a claim by the sender.** The only thing
+authenticated on an ACCP message is the sending domain, via DKIM and DMARC
+(§9.1). A `principal` naming Acme Ltd means "a sender authenticated as
+acme.example says it acts for Acme Ltd" — nothing stronger.
+
+Therefore:
+
+- A receiver MUST NOT grant authority on the strength of `principal` or
+  `delegation` alone. Where a decision needs real authorisation, it must come
+  from out-of-band verification, a prior relationship, or a credential the
+  protocol does not define.
+- A receiver MUST NOT treat `constraints` as enforcement. They express what the
+  sender asks of the recipient; nothing makes a peer honour them. They are worth
+  carrying because a cooperating peer will, and because ignoring a stated
+  constraint is then a deliberate act rather than an accident.
+- `provenance` is self-reported, and an agent with a reason to misreport it can.
+
+This is stated plainly because the alternative is worse: a context block that
+looks like authorisation invites implementations to treat it as authorisation,
+and that is a straightforward privilege-escalation path across a trust boundary.
+Context is for *deciding well*, not for *deciding who may*.
+
+### 6.3 Requirements
+
+- **C-1** An endpoint MUST make the received context available to the agent
+  unmodified.
+- **C-2** An endpoint MUST NOT populate `principal`, `delegation` or
+  `provenance` on an inbound message from its own inference. An absent member
+  stays absent.
+- **C-3** An endpoint SHOULD populate `delegation.depth` on outbound messages
+  and MUST refuse to send past its configured maximum depth.
+- **C-4** Context MUST survive external transport intact, as part of the
+  `application/accp+json` part.
+- **C-5** An endpoint MUST NOT log or persist a payload or context carrying
+  `constraints.confidential` beyond what `constraints.retain_until` allows,
+  where it is able to honour it.
+
+## 7. Discovery
 
 An agent that cannot find its counterpart is limited to addresses hardcoded when
 it was built.
@@ -245,7 +390,7 @@ An endpoint MAY publish a card for an agent, as `application/json`:
 
 ```json
 {
-  "accp_version": "0.1",
+  "accp_version": "0.2",
   "address": "invoices@acme.example",
   "display_name": "Invoice parser",
   "description": "Extracts totals and due dates from invoices.",
@@ -276,7 +421,7 @@ validate what actually arrives.
 
 ---
 
-## 7. Errors
+## 8. Errors
 
 An agent that cannot handle a message SHOULD reply with `ACCP-Intent: error`
 and a payload:
@@ -310,7 +455,7 @@ reports indefinitely — the same loop §3.4 guards, arriving by a different doo
 
 ---
 
-## 8. Trust and admission
+## 9. Trust and admission
 
 Every agent MUST declare an inbox policy. Endpoints MUST implement all four
 tiers.
@@ -336,11 +481,11 @@ the results available to the receiving agent.
 Agent identity in ACCP is domain identity: an ACCP message is exactly as
 trustworthy as the claim that it came from `acme.example`. This is a real limit.
 It says nothing about which program at `acme.example` sent it, or whether that
-program was behaving as its operator intended. §9 covers the consequences.
+program was behaving as its operator intended. §10 covers the consequences.
 
 ---
 
-## 9. Security considerations
+## 10. Security considerations
 
 ### 9.1 Inbound content is untrusted input to a model
 
@@ -363,7 +508,7 @@ the agent is persuaded to attempt, the credential must not be able to do it.
 
 ### 9.2 Loops and amplification
 
-§3.4 and §7 bound automated exchange. Endpoints MUST additionally enforce a
+§3.4 and §8 bound automated exchange. Endpoints MUST additionally enforce a
 per-conversation rate ceiling; 30 messages per minute is a reasonable default.
 An agent pair exchanging messages as fast as a datacentre allows will exhaust a
 sending quota and damage a domain's reputation long before a human notices.
@@ -377,7 +522,7 @@ limits and the ability to suspend an agent immediately.
 ### 9.4 Spam at agent scale
 
 Automated senders can generate volume no human can. ACCP's admission policies
-(§8) put the decision with the receiver rather than relying on content
+(§9) put the decision with the receiver rather than relying on content
 filtering, which is why `verified` and not `open` is the default. Endpoints
 issuing addresses on a shared domain SHOULD apply progressive sending limits to
 new agents: reputation on that domain is a shared resource.
@@ -391,7 +536,7 @@ part is encrypted along with the rest of the body.
 
 ---
 
-## 10. Conformance
+## 11. Conformance
 
 ### 10.1 Core (required)
 
@@ -403,9 +548,12 @@ An implementation conforms to **ACCP Core** if it:
    human-readable part alongside (§5.2).
 4. Populates `In-Reply-To` and `References` on replies (§3.3).
 5. Accepts unrecognised intents as `notify` (§4).
-6. Implements all four inbox policies, defaulting to `verified` (§8).
-7. Evaluates SPF, DKIM and DMARC on inbound and exposes the results (§8.1).
-8. Never replies to `error` with `error` (§7).
+6. Implements all four inbox policies, defaulting to `verified` (§9).
+7. Evaluates SPF, DKIM and DMARC on inbound and exposes the results (§9.1).
+8. Never replies to `error` with `error` (§8).
+9. Carries the context envelope of §5.1, passes received context to the agent
+   unmodified, and never fabricates `principal`, `delegation` or `provenance`
+   on inbound (§6.3).
 
 Core requires no HTTP API. An implementation that only sends and receives SMTP
 can conform.
@@ -428,11 +576,11 @@ delivery means a message can arrive twice.
 
 ### 10.3 Directory profile (optional)
 
-Adds §6.2 resolution at `/.well-known/accp/agent`.
+Adds §7.2 resolution at `/.well-known/accp/agent`.
 
 ---
 
-## 11. Open questions
+## 12. Open questions
 
 1. **Payload semantics.** §5.3 standardises the envelope only. Is a capability
    registry with schema references worth the coordination cost, or does it
@@ -448,10 +596,14 @@ Adds §6.2 resolution at `/.well-known/accp/agent`.
 5. **Deprecating hop counting.** Is a hop ceiling the right bound, or should it
    be a conversation-lifetime budget the initiator sets and every participant
    decrements?
-6. **The name.** "Context" sits oddly: context is what MCP supplies to a model,
-   whereas this protocol carries messages between peers. **Agent Communication
-   Protocol (ACP)** describes it more accurately. Retained as ACCP here because
-   that is what was asked for; worth settling before anything is published.
+6. **How much context is too much.** Every member of §6.1 is optional, and a
+   sender with an incentive to be persuasive can fill `summary` with whatever it
+   likes. Should receivers cap its length, or is that the receiving model's
+   problem?
+7. **Verifiable principals.** §6.2 is emphatic that context is asserted rather
+   than proved, which limits what it can be used for. A signed assertion — the
+   sending domain vouching for a principal — would lift that limit, at the cost
+   of a key distribution problem the protocol has so far avoided. Worth it?
 
 ---
 
@@ -466,7 +618,7 @@ Subject: Quote request: WIDGET-1 x40
 Message-ID: <01J8X2QK@acme.example>
 Date: Thu, 27 Aug 2026 20:41:03 +0000
 MIME-Version: 1.0
-ACCP-Version: 0.1
+ACCP-Version: 0.2
 ACCP-Intent: request
 ACCP-Conversation: cnv_01J8X2QK7ZP
 ACCP-Hops: 1
@@ -485,13 +637,37 @@ Content-Type: application/accp+json; charset=UTF-8
 Content-Disposition: inline; filename="accp.json"
 
 {
-  "sku": "WIDGET-1",
-  "quantity": 40,
-  "deliver_to": "Kampala, UG",
-  "needed_by": "2026-09-05"
+  "accp": "0.2",
+  "context": {
+    "principal": {
+      "type": "organization",
+      "id": "acme.example",
+      "display_name": "Acme Ltd"
+    },
+    "delegation": {
+      "depth": 2,
+      "chain": ["person:ada@acme.example", "agent:buyer@acme.example"]
+    },
+    "summary": "Ada asked for 40 units of WIDGET-1 into Kampala by 5 September. Two earlier suppliers could not meet the date.",
+    "expects": { "reply_by": "2026-09-01T00:00:00Z", "format": "structured" },
+    "constraints": { "confidential": true, "do_not_train": true },
+    "provenance": { "generated_by": "model", "human_reviewed": false }
+  },
+  "payload": {
+    "sku": "WIDGET-1",
+    "quantity": 40,
+    "deliver_to": "Kampala, UG",
+    "needed_by": "2026-09-05"
+  }
 }
 --b1--
 ```
+
+The seller's agent can now act. It knows it is quoting Acme rather than an
+unattached program, that a human two steps back wanted this, that the date is
+the binding constraint because two suppliers already failed it, when the answer
+is needed, and that the request should not be forwarded or trained on. None of
+that is in the payload, and none of it survives without being carried.
 
 The seller's reply:
 
@@ -502,7 +678,7 @@ Subject: Re: Quote request: WIDGET-1 x40
 Message-ID: <01J8X2R4@widgets.example>
 In-Reply-To: <01J8X2QK@acme.example>
 References: <01J8X2QK@acme.example>
-ACCP-Version: 0.1
+ACCP-Version: 0.2
 ACCP-Intent: response
 ACCP-Conversation: cnv_01J8X2QK7ZP
 ACCP-Hops: 2
@@ -518,10 +694,17 @@ Content-Type: application/accp+json; charset=UTF-8
 Content-Disposition: inline; filename="accp.json"
 
 {
-  "unit_price": 12000,
-  "currency": "UGX",
-  "total": 480000,
-  "delivery_date": "2026-09-03"
+  "accp": "0.2",
+  "context": {
+    "principal": { "type": "organization", "id": "widgets.example", "display_name": "Widgets Ltd" },
+    "expects": { "format": "structured" }
+  },
+  "payload": {
+    "unit_price": 12000,
+    "currency": "UGX",
+    "total": 480000,
+    "delivery_date": "2026-09-03"
+  }
 }
 --b2--
 ```
@@ -542,7 +725,7 @@ Were this pursued as a standard, registration would be required for:
   `ACCP-Idempotency-Key`, `ACCP-Expires` in the Provisional Message Header Field
   Names registry, per RFC 3864.
 - **Well-known URI** `accp`, per RFC 8615.
-- Registries for intents (§4) and error codes (§7), with a low barrier to entry
+- Registries for intents (§4) and error codes (§8), with a low barrier to entry
   — specification required rather than standards action.
 
 None of this has been done. This document is a draft for discussion.

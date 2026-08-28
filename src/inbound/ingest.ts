@@ -115,7 +115,9 @@ export class InboundService {
       text: parsed.text,
       headers: { ...parsed.headers, 'x-agentmail-spf': verdicts.spf ?? 'UNKNOWN', 'x-agentmail-dmarc': verdicts.dmarc ?? 'UNKNOWN' },
       attachments: parsed.attachments,
+      // ACCP §6.3 C-1/C-2: delivered unmodified, and never inferred when absent.
       structured: parsed.structured,
+      context: (parsed.context as Message['context']) ?? null,
       rfcMessageId: parsed.messageId ?? newRfcMessageId(this.config.platformDomain),
       inReplyTo: parsed.inReplyTo,
       references: parsed.references,

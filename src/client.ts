@@ -22,6 +22,7 @@ export interface SendMessageInput {
   text?: string;
   html?: string;
   structured?: unknown;
+  context?: unknown;
   cc?: string | string[];
   reply_to?: string | string[];
   in_reply_to?: string;

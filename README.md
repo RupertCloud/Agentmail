@@ -19,7 +19,11 @@ HTTP or MCP without touching DNS.
 The wire format is specified independently of this implementation as
 [**ACCP**, the Agent Communication Context Protocol](docs/accp/SPEC.md) — a
 profile over RFC 5322 and MIME, so a conformant message is a valid email that
-any mail system can carry and any human can read.
+any mail system can carry and any human can read. Its centre is
+[context](docs/accp/SPEC.md#6-context): who the sender acts for, how far the
+authority has been delegated, what has already happened, what reply is expected,
+and how the contents may be handled — everything a recipient across a trust
+boundary needs and cannot infer.
 
 The design is specified in [`SRS-silk-relay.md`](SRS-silk-relay.md) and
 [Amendment A — Agent Mailboxes](docs/SRS-amendment-a-agents.md).
@@ -141,6 +145,7 @@ MCP and ACCP run on different axes, and an agent wants both:
 | Axis | agent → its tools | agent ↔ another agent |
 | Trust | one boundary | crosses boundaries |
 | Session | long-lived | none; each message stands alone |
+| Context | assembled locally from tools | carried across the boundary, in the message |
 | Timing | synchronous | asynchronous; the peer may be offline for days |
 | Delivery | a connection, or an error | store-and-forward, with retry |
 

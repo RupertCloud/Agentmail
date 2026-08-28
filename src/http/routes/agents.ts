@@ -180,6 +180,7 @@ export function registerAgentRoutes(router: Router): void {
         text: optionalString(ctx.body, 'text'),
         html: optionalString(ctx.body, 'html'),
         structured: ctx.body.structured,
+        context: ctx.body.context as never,
         inReplyTo: original.rfcMessageId,
       },
       agent,
