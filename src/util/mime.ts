@@ -24,17 +24,100 @@ export const HEADER_CAPABILITY = 'ACCP-Capability';
 export const HEADER_CORRELATION = 'ACCP-Correlation';
 export const HEADER_IDEMPOTENCY = 'ACCP-Idempotency-Key';
 export const HEADER_EXPIRES = 'ACCP-Expires';
+export const HEADER_CONTENT_DIGEST = 'ACCP-Content-Digest';
+/** Superseded by ACCP-Content-Digest; still read on the way in. */
 export const HEADER_PAYLOAD_DIGEST = 'ACCP-Payload-Digest';
 
 /**
- * Digest of the decoded envelope bytes, so a receiver can tell whether the
- * payload it is acting on is the one that was sent. Computed over the decoded
- * UTF-8 text rather than the encoded part, so that an intermediary re-encoding
- * base64 or re-wrapping lines — which happens routinely — does not read as
- * tampering.
+ * Content commitment, borrowing three ideas from the zk-SNARK toolkit without
+ * any of the zero-knowledge:
+ *
+ * 1. **Commit to parts separately, not to the message as a whole.** Mail is
+ *    legitimately rewritten in transit — a list server appends a footer, a
+ *    gateway prepends a banner — and a single digest over everything cannot
+ *    distinguish that from someone altering the payload. Per-part leaves let a
+ *    receiver say "the prose changed, the payload did not".
+ * 2. **Bind the commitment to its context.** A proof detached from its public
+ *    inputs is replayable; so is a digest. Each leaf commits to the Message-ID,
+ *    so a valid (digest, payload) pair cannot be spliced into another message.
+ * 3. **Domain separation.** Every hash input carries a label naming its role,
+ *    so a digest computed for one purpose cannot be reinterpreted as another.
+ *
+ * Deliberately *not* copied: a Merkle tree. Its logarithmic proofs pay off over
+ * thousands of leaves; a message has three or four, and listing them all is
+ * both smaller and simpler. The root is here to bind the set together and give
+ * one value to sign, not to enable membership proofs.
  */
-export function payloadDigest(envelopeText: string): string {
-  return `sha-256=${createHash('sha256').update(envelopeText, 'utf8').digest('base64')}`;
+const LEAF_LABEL = 'ACCP-part-v1';
+const ROOT_LABEL = 'ACCP-root-v1';
+
+/** Parts committed to, in a fixed order so the root is reproducible. */
+export const COMMITTED_PARTS = ['payload', 'text', 'html'] as const;
+export type CommittedPart = (typeof COMMITTED_PARTS)[number];
+
+function b64(buffer: Buffer): string {
+  return buffer.toString('base64');
+}
+
+/** Leaf digest for one named part, bound to the message it belongs to. */
+export function partDigest(part: string, messageId: string, content: string): string {
+  return b64(
+    createHash('sha256')
+      .update(`${LEAF_LABEL}\0${part}\0${messageId}\0`, 'utf8')
+      .update(content, 'utf8')
+      .digest(),
+  );
+}
+
+/** Binds the leaves together, so parts cannot be substituted or reordered. */
+export function contentRoot(messageId: string, leaves: Record<string, string>): string {
+  const hash = createHash('sha256').update(`${ROOT_LABEL}\0${messageId}\0`, 'utf8');
+  for (const part of COMMITTED_PARTS) {
+    hash.update(`${part}=${leaves[part] ?? ''};`, 'utf8');
+  }
+  return b64(hash.digest());
+}
+
+export interface ContentDigest {
+  alg: string;
+  root: string;
+  leaves: Record<string, string>;
+}
+
+export function formatContentDigest(digest: ContentDigest): string {
+  const parts = COMMITTED_PARTS.filter((p) => digest.leaves[p] !== undefined).map(
+    (p) => `${p}=${digest.leaves[p]}`,
+  );
+  return [`alg=${digest.alg}`, `root=${digest.root}`, ...parts].join('; ');
+}
+
+export function parseContentDigest(header: string | undefined): ContentDigest | null {
+  if (!header) return null;
+  const fields: Record<string, string> = {};
+  for (const piece of header.split(';')) {
+    const idx = piece.indexOf('=');
+    if (idx === -1) continue;
+    fields[piece.slice(0, idx).trim().toLowerCase()] = piece.slice(idx + 1).trim();
+  }
+  if (!fields.root) return null;
+  const leaves: Record<string, string> = {};
+  for (const part of COMMITTED_PARTS) {
+    if (fields[part]) leaves[part] = fields[part];
+  }
+  return { alg: fields.alg ?? 'sha-256', root: fields.root, leaves };
+}
+
+/** Computes the commitment for a message about to be sent. */
+export function buildContentDigest(
+  messageId: string,
+  contents: Partial<Record<CommittedPart, string>>,
+): ContentDigest {
+  const leaves: Record<string, string> = {};
+  for (const part of COMMITTED_PARTS) {
+    const content = contents[part];
+    if (content !== undefined) leaves[part] = partDigest(part, messageId, content);
+  }
+  return { alg: 'sha-256', root: contentRoot(messageId, leaves), leaves };
 }
 
 /**
@@ -131,6 +214,7 @@ export function buildRawMessage(input: RawMessageInput): string {
   }
 
   const bodyParts: string[] = [];
+  let structuredText: string | undefined;
   const text = input.text ?? '';
   const html = input.html ?? '';
   if (text) bodyParts.push(part('text/plain; charset=UTF-8', text));
@@ -162,7 +246,7 @@ export function buildRawMessage(input: RawMessageInput): string {
       payload: input.structured ?? null,
     };
     const envelopeText = JSON.stringify(envelope, null, 2);
-    push(HEADER_PAYLOAD_DIGEST, payloadDigest(envelopeText));
+    structuredText = envelopeText;
     mixedParts.push(
       part(`${STRUCTURED_MEDIA_TYPE}; charset=UTF-8`, envelopeText, [
         `Content-Disposition: inline; filename="${STRUCTURED_PART_NAME}"`,
@@ -178,6 +262,19 @@ export function buildRawMessage(input: RawMessageInput): string {
         '',
         (attachment.content.match(/.{1,76}/g) ?? []).join('\r\n'),
       ].join('\r\n'),
+    );
+  }
+
+  if (structuredText !== undefined) {
+    push(
+      HEADER_CONTENT_DIGEST,
+      formatContentDigest(
+        buildContentDigest(input.messageId, {
+          payload: structuredText,
+          ...(text ? { text } : {}),
+          ...(html ? { html } : {}),
+        }),
+      ),
     );
   }
 

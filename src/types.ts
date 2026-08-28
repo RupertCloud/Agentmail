@@ -243,6 +243,12 @@ export interface Message {
    */
   payloadIntegrity?: 'verified' | 'modified' | 'unverified' | null;
 
+  /**
+   * Which committed parts failed verification. A message may legitimately have
+   * `text` here — a list footer, a gateway banner — while `payload` verifies.
+   */
+  modifiedParts?: string[];
+
   /** Per-mechanism authentication results, so an agent need not infer them. */
   authResults?: { spf?: string; dkim?: string; dmarc?: string } | null;
 

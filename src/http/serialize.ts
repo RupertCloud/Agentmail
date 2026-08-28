@@ -50,6 +50,7 @@ export function messageJson(message: Message, options: { includeBody?: boolean }
     base.structured = message.structured ?? null;
     base.context = message.context ?? null;
     base.payload_integrity = message.payloadIntegrity ?? null;
+    base.modified_parts = message.modifiedParts ?? [];
     base.auth_results = message.authResults ?? null;
     base.headers = message.headers;
     base.attachments = message.attachments.map((attachment) => ({

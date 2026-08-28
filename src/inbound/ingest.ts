@@ -7,11 +7,14 @@ import type { Agent, Id, Message } from '../types.js';
 import { domainOf, normalizeSubject } from '../util/email.js';
 import { newId, newRfcMessageId } from '../util/ids.js';
 import {
+  COMMITTED_PARTS,
+  HEADER_CONTENT_DIGEST,
   HEADER_CONVERSATION,
   HEADER_HOPS,
-  HEADER_PAYLOAD_DIGEST,
+  contentRoot,
+  parseContentDigest,
   parseRawMessage,
-  payloadDigest,
+  partDigest,
 } from '../util/mime.js';
 
 export type Verdict = 'PASS' | 'FAIL' | 'GRAY' | 'PROCESSING_FAILED' | 'DISABLED';
@@ -101,6 +104,7 @@ export class InboundService {
     verdicts: NonNullable<InboundDelivery['verdicts']>,
   ): Promise<Message> {
     const threadId = await this.resolveThread(agent, parsed);
+    const integrity = checkIntegrity(parsed);
     const hops = Number(parsed.headers[HEADER_HOPS.toLowerCase()] ?? '0');
     const now = new Date().toISOString();
 
@@ -124,7 +128,8 @@ export class InboundService {
       // ACCP §6.4 C-1/C-2: delivered unmodified, and never inferred when absent.
       structured: parsed.structured,
       context: (parsed.context as Message['context']) ?? null,
-      payloadIntegrity: checkIntegrity(parsed),
+      payloadIntegrity: integrity.payloadIntegrity,
+      modifiedParts: integrity.modifiedParts,
       authResults: {
         spf: verdicts.spf ?? 'UNKNOWN',
         dkim: verdicts.dkim ?? 'UNKNOWN',
@@ -157,6 +162,7 @@ export class InboundService {
       transport: 'provider',
       spam: verdicts.spam ?? 'UNKNOWN',
       payload_integrity: message.payloadIntegrity ?? null,
+      modified_parts: message.modifiedParts ?? [],
     });
     this.notifier.publish(message);
     return message;
@@ -212,17 +218,56 @@ function conversationKeyFor(parsed: ReturnType<typeof parseRawMessage>): string 
 }
 
 /**
- * Compares the received envelope against the digest the sender published.
+ * Verifies the content commitment part by part.
  *
- * A mismatch means the payload was altered between sending and arrival —
- * usually benignly, by a list server or a security gateway, but the agent has
- * to be told either way rather than acting on it as though it were intact.
+ * The point of committing to parts separately is that a rewritten prose body
+ * and a rewritten payload are different events. A list server appending a
+ * footer is routine; a payload that no longer matches is not. Reporting one
+ * verdict for the whole message conflates them, and the agent acts on the
+ * payload.
  */
-function checkIntegrity(
-  parsed: ReturnType<typeof parseRawMessage>,
-): 'verified' | 'modified' | 'unverified' | null {
-  if (parsed.structuredRaw == null) return null;
-  const declared = parsed.headers[HEADER_PAYLOAD_DIGEST.toLowerCase()];
-  if (!declared) return 'unverified';
-  return declared.trim() === payloadDigest(parsed.structuredRaw) ? 'verified' : 'modified';
+function checkIntegrity(parsed: ReturnType<typeof parseRawMessage>): {
+  payloadIntegrity: 'verified' | 'modified' | 'unverified' | null;
+  modifiedParts: string[];
+} {
+  const hasPayload = parsed.structuredRaw != null;
+  const declared = parseContentDigest(parsed.headers[HEADER_CONTENT_DIGEST.toLowerCase()]);
+  if (!declared) {
+    return { payloadIntegrity: hasPayload ? 'unverified' : null, modifiedParts: [] };
+  }
+
+  const messageId = parsed.messageId ?? '';
+  const received: Record<string, string | undefined> = {
+    payload: parsed.structuredRaw ?? undefined,
+    text: parsed.text ?? undefined,
+    html: parsed.html ?? undefined,
+  };
+
+  const modifiedParts: string[] = [];
+  const recomputed: Record<string, string> = {};
+  for (const part of COMMITTED_PARTS) {
+    const claimed = declared.leaves[part];
+    if (claimed === undefined) continue;
+    const content = received[part];
+    const actual = content === undefined ? null : partDigest(part, messageId, content);
+    if (actual !== null) recomputed[part] = actual;
+    if (actual !== claimed) modifiedParts.push(part);
+  }
+
+  // The root binds the leaf set: a mismatch means parts were substituted,
+  // reordered or dropped even where each surviving leaf still matches.
+  if (contentRoot(messageId, declared.leaves) !== declared.root) {
+    if (!modifiedParts.includes('root')) modifiedParts.push('root');
+  }
+
+  if (!hasPayload) return { payloadIntegrity: null, modifiedParts };
+  if (declared.leaves.payload === undefined) {
+    return { payloadIntegrity: 'unverified', modifiedParts };
+  }
+  return {
+    payloadIntegrity: modifiedParts.includes('payload') || modifiedParts.includes('root')
+      ? 'modified'
+      : 'verified',
+    modifiedParts,
+  };
 }

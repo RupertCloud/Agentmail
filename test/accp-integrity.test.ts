@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { HEADER_PAYLOAD_DIGEST, buildRawMessage, parseRawMessage, payloadDigest } from '../src/util/mime.js';
+import {
+  HEADER_CONTENT_DIGEST,
+  buildContentDigest,
+  buildRawMessage,
+  formatContentDigest,
+  parseContentDigest,
+  parseRawMessage,
+  partDigest,
+} from '../src/util/mime.js';
 import { newHarness, seedAccount, seedAgent } from './helpers.js';
 
 function signedMessage(payload: unknown): string {
@@ -15,14 +23,27 @@ function signedMessage(payload: unknown): string {
   });
 }
 
-test('an outbound message publishes a digest of its envelope', () => {
+test('an outbound message publishes a per-part commitment bound to its Message-ID', () => {
   const raw = signedMessage({ sku: 'W-1', quantity: 40 });
   const parsed = parseRawMessage(raw);
-  const declared = parsed.headers[HEADER_PAYLOAD_DIGEST.toLowerCase()];
+  const declared = parseContentDigest(parsed.headers[HEADER_CONTENT_DIGEST.toLowerCase()]);
 
-  assert.ok(declared, 'the digest header must be present when a payload is');
-  assert.match(declared, /^sha-256=/);
-  assert.equal(declared, payloadDigest(parsed.structuredRaw!), 'and must match what was sent');
+  assert.ok(declared, 'the commitment header must be present when a payload is');
+  assert.ok(declared.leaves.payload, 'the payload leaf must be present');
+  assert.ok(declared.leaves.text, 'the prose leaf must be present');
+  assert.equal(
+    declared.leaves.payload,
+    partDigest('payload', parsed.messageId!, parsed.structuredRaw!),
+    'the payload leaf must match what was sent',
+  );
+
+  // Binding: the identical content under a different Message-ID commits
+  // differently, so a captured (digest, payload) pair cannot be replayed
+  // onto another message.
+  assert.notEqual(
+    declared.leaves.payload,
+    partDigest('payload', '<other@elsewhere.test>', parsed.structuredRaw!),
+  );
 });
 
 test('an intact message arrives with integrity verified', async () => {
@@ -135,4 +156,72 @@ test('a message with no payload has no integrity verdict to give', async () => {
 
   const [received] = await platform.mailbox.list(agent);
   assert.equal(received.payloadIntegrity, null);
+});
+
+test('a footer appended to the prose does not condemn the payload', async () => {
+  const { platform } = newHarness();
+  const { account } = await seedAccount(platform, 'acme');
+  const { agent } = await seedAgent(platform, account, 'seller');
+
+  const raw = signedMessage({ sku: 'W-1', quantity: 40 }).replace(
+    'To: seller@acme.test',
+    `To: ${agent.address}`,
+  );
+
+  // A list server appends its footer to the text part; the payload is intact.
+  const original = parseRawMessage(raw);
+  const originalText = original.text!;
+  const withFooter = `${originalText}\n\n--\nThis list is hosted by lists.example`;
+  const tampered = raw.replace(
+    Buffer.from(originalText, 'utf8').toString('base64').match(/.{1,76}/g)!.join('\r\n'),
+    Buffer.from(withFooter, 'utf8').toString('base64').match(/.{1,76}/g)!.join('\r\n'),
+  );
+  assert.notEqual(tampered, raw, 'the fixture must actually change the prose');
+
+  await platform.inbound.ingest({
+    raw: tampered,
+    recipients: [agent.address],
+    verdicts: { dmarc: 'PASS' },
+  });
+
+  const [received] = await platform.mailbox.list(agent);
+  assert.equal(
+    received.payloadIntegrity,
+    'verified',
+    'the payload did not change, and the verdict must say so',
+  );
+  assert.deepEqual(received.modifiedParts, ['text'], 'while naming exactly what did');
+});
+
+test('a commitment cannot be replayed from another message', () => {
+  // An attacker observes message A and splices its valid (header, payload)
+  // pair into message B. Every leaf matches its content — but each leaf
+  // committed to A's Message-ID, so under B's Message-ID nothing verifies.
+  const payloadText = '{"accp":"0.2","payload":{"sku":"W-1"}}';
+  const stolen = buildContentDigest('<a@acme.test>', { payload: payloadText });
+
+  const replayed = [
+    'From: attacker@elsewhere.test',
+    'To: seller@acme.test',
+    'Subject: Replayed',
+    'Message-ID: <b@elsewhere.test>',
+    `ACCP-Content-Digest: ${formatContentDigest(stolen)}`,
+    'MIME-Version: 1.0',
+    'Content-Type: multipart/mixed; boundary="b"',
+    '',
+    '--b',
+    'Content-Type: application/accp+json',
+    'Content-Disposition: inline; filename="accp.json"',
+    '',
+    payloadText,
+    '--b--',
+  ].join('\r\n');
+
+  const parsed = parseRawMessage(replayed);
+  const recomputed = partDigest('payload', parsed.messageId!, parsed.structuredRaw!);
+  assert.notEqual(
+    recomputed,
+    stolen.leaves.payload,
+    'the stolen leaf must not verify under a different Message-ID',
+  );
 });

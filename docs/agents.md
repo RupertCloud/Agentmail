@@ -157,6 +157,7 @@ sender says nothing about an intact body. Every inbound message carries:
 | `payload_integrity: "verified"` | The payload is byte-for-byte what the sender wrote |
 | `payload_integrity: "modified"` | It changed in transit. Usually benign, never assume so |
 | `payload_integrity: "unverified"` | No digest was published; nothing to check against |
+| `modified_parts` | Exactly which parts changed — `["text"]` is a list footer; `["payload"]` is not |
 | `auth_results` | SPF, DKIM and DMARC **separately**, not one verdict |
 
 A human reading a mangled message notices. An agent parsing `{"quantity": 4000}`
