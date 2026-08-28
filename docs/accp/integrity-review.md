@@ -5,18 +5,29 @@ A record of trying to break the `ACCP-Content-Digest` message-integrity scheme
 security claim is worth exactly as much as the attacks it survived, and a reader
 deciding whether to rely on `payload_integrity: verified` deserves to see them.
 
-**Status: findings frozen; fixes pending.** Author attack plus two of three
-independent red-team passes (construction, threat-model claims) are complete and
-their findings verified and merged below. The implementation pass is still
-running. Fixes are applied in one reconciled pass once all three land, so
-nothing is patched piecemeal.
+**Status: findings frozen; fixes pending.** Author attack plus all three
+independent red-team passes (construction, implementation, threat-model claims)
+are complete and every finding verified against the code before acceptance.
+Fixes are applied in one reconciled pass, so nothing is patched piecemeal.
 
-Headline: **13 confirmed defects — 7 in code, 6 in the spec/guidance.** The two
-load-bearing guarantees the scheme advertises (the root binds the leaf set; each
-leaf is bound to the Message-ID) are **both not delivered as implemented**. What
-actually survives is the per-leaf, domain-separated comparison — and only to the
-strength of whatever DKIM covers the header, which the spec makes optional and
-this platform's SES Easy DKIM cannot provide at all.
+Headline: **16 confirmed defects — 10 in code, 6 in the spec/guidance**,
+including one **critical in-transit payload forge**. The central claim — that a
+receiver can tell whether the payload it acts on is what the sender wrote, and
+cannot be fooled — is **false as implemented.** The two load-bearing guarantees
+the scheme advertises (the root binds the leaf set; each leaf is bound to the
+Message-ID) are both not delivered. What actually survives is the per-leaf,
+domain-separated comparison — and only to the strength of whatever DKIM covers
+the header, which the spec makes optional and this platform's SES Easy DKIM
+cannot provide at all.
+
+> **A note on method.** The critical forge (C0) was reported by the
+> implementation red-teamer and my *first* attempt to reproduce it independently
+> **failed** — a folded-header bug in my test fixture spliced the attacker's
+> header into the middle of the honest one, so the honest value won and the
+> verdict came back `modified`. I nearly recorded the finding as unreproducible.
+> Fixing my own harness and re-running confirmed the forge exactly as reported.
+> A red-team claim is a lead; the verification is the work, and the verification
+> has to be right too.
 
 ---
 
@@ -34,14 +45,20 @@ The scheme, as built:
   as `verified` / `modified` / `unverified` plus the list of parts that changed,
   and exposes SPF/DKIM/DMARC separately.
 
-The claims under test:
+The claims under test (verdict in brackets, filled in after review):
 
 1. A receiver can tell whether the payload it acts on is what the sender wrote.
+   **[FALSE — C0 forges a `verified` verdict on a tampered payload.]**
 2. A benign rewrite of one part (a list footer on `text`) does not condemn
-   another part (`payload`).
+   another part (`payload`). **[Partly — but C6 false-condemns honest prose,
+   and C1 means the reverse binding is unenforced.]**
 3. A (digest, payload) pair cannot be replayed onto a different message.
+   **[FALSE for id-less messages (C4); and a whole intact message replays
+   freely (S3).]**
 4. Against a malicious active attacker, integrity holds **only** when DKIM signs
-   the header (§9.2 states this limitation explicitly).
+   the header (§9.2 states this limitation explicitly). **[True, and worse than
+   stated — on this platform SES Easy DKIM cannot sign the header at all (S1),
+   so the condition is never met.]**
 
 ---
 
@@ -59,13 +76,17 @@ convergence that makes them worth trusting.
 
 | # | Severity | Status | Summary |
 |---|----------|--------|---------|
+| **C0** | **Critical** | **Confirmed, forge reproduced** | **In-transit payload forge.** A MITM swaps the payload body and appends a second `ACCP-Content-Digest` committing to the forgery. `parseHeaders` joins duplicate headers with `, `; `parseContentDigest` is last-field-wins, so the attacker's digest wins. A tampered `{"quantity": 4000}` arrives `verified`, `modifiedParts: []`. Runs with `dkim: FAIL` — the exact adversary the scheme targets. |
 | C1 | High | Confirmed ×3 | The root check is a tautology — `contentRoot(messageId, declared.leaves)` and `declared.root` both come from the header. The content-derived `recomputed` leaves are computed and never read. The root enforces nothing. |
 | C2 | High | Confirmed | Silent part-drop / prose-swap. The leaf loop `continue`s on an absent leaf, so an attacker who drops a committed part (and its header field, recomputing the root — trivial per C1) gets `verified`, `modifiedParts: []`. The mandatory human-readable part can vanish with no signal. |
 | C3 | High | Confirmed | Stripping the digest header yields `unverified`, which the agent-facing text frames as "no digest to check" — softer than `modified`. A receiver cannot distinguish "never committed" from "commitment stripped", and I-1 is unenforced on ingest. |
 | C4 | Medium | Confirmed ×3 | A message with no `Message-ID` binds every leaf and the root to the empty string, so the anti-replay binding collapses for id-less messages. |
 | C5 | Low–Med | Confirmed | The leaf pre-image `LABEL‖0x00‖part‖0x00‖messageId‖0x00‖content` is not injective: `\0` may appear in both `messageId` and `content`, so `(X, "Y\0Z")` and `(X\0Y, "Z")` collide. Gated by MTAs stripping NUL from headers, but a design defect — fields must be length-prefixed. |
 | C6 | Medium | Confirmed | Trim asymmetry. The sender digests untrimmed `text`/`html`; the parser stores them `.trim()`ed. Any prose with a trailing newline — near-universal — false-reports `modified`, training agents to ignore the signal; and surrounding-whitespace tampering is invisible **even under a signed digest**. |
-| C7 | Medium | Confirmed | Caller-supplied reserved `ACCP-*` headers are emitted verbatim, producing a duplicate `ACCP-Content-Digest`; `parseHeaders` joins duplicates with `, ` and `parseContentDigest` is last-key-wins / first-field-wins, giving a header-injection primitive. |
+| C7 | Medium | Confirmed | Caller-supplied reserved `ACCP-*` headers are emitted verbatim (the sender-side companion to C0's receive-side forge). |
+| C8 | Medium | Confirmed | Attachments are never committed — `COMMITTED_PARTS` is `payload`/`text`/`html` only. A MITM can add, replace or drop an attachment with `verified` unchanged, even when the payload says "see attached invoice". |
+| C9 | Low–Med | Confirmed | `alg` is never verified — `checkIntegrity` never reads `declared.alg`, and `partDigest` is hard-wired to SHA-256. A header claiming `alg=bogus-md4` is accepted and reported `verified`. No downgrade protection. |
+| C10 | Medium | Confirmed | The envelope is not bound. `From`/`To`/`Subject`/date are outside the commitment, so a valid payload can be re-enveloped under a spoofed sender/subject and still read `verified`. |
 
 ### Specification / guidance defects
 
@@ -214,6 +235,10 @@ change is code or wording.
 
 **Code**
 
+0. **Kill the duplicate-header forge (C0, C7).** Treat more than one
+   `ACCP-Content-Digest` on ingest as `digest_missing`, never merge duplicate
+   values into one. Strip caller-supplied reserved `ACCP-*` from outbound
+   `headers`. This is the critical fix and lands first.
 1. **Make the root do work (C1, C2).** Recompute the root from the
    *content-derived* leaves over a **fixed, full part set** (`payload`, `text`,
    `html` always), so a committed-then-dropped part fails the root instead of
@@ -238,6 +263,12 @@ change is code or wording.
    covered by a valid DKIM body hash) and `dmarc_method` (`spf`/`dkim`/`both`) to
    the receive-side data, so an agent can implement the real rule with fields
    rather than inference.
+8. **Commit the attachments (C8).** Add an `attachments` leaf over the ordered
+   set of attachment filename+content-type+content hashes, so a swapped or
+   dropped attachment fails verification.
+9. **Verify `alg`, and bind the envelope (C9, C10).** Reject an unrecognised
+   `alg`; fold `From` and `Date` into the commitment so a re-enveloped payload
+   does not read `verified`.
 
 **Wording**
 
@@ -254,10 +285,24 @@ change is code or wording.
 11. **Fix Appendix C.4 (S6)** to bind proofs to the `root` of
     `ACCP-Content-Digest`, not the forbidden legacy `ACCP-Payload-Digest`.
 
-## Pending
+## Verdict
 
-One red-team pass (implementation — parser disagreement, two-payload MIME
-confusion, encoding round-trip false-positives) is still running; its confirmed
-findings will be merged before the fix pass begins. Every reported finding is
-re-verified against the code by the author before it is accepted; a red-team
-claim is a lead, not a verdict.
+The `ACCP-Content-Digest` scheme as shipped in commit `96d2256` is **not fit to
+be relied on.** Against an active attacker it provides a critical forge (C0), no
+set-binding (C1/C2), a soft downgrade on stripping (C3), no replay defence
+(S3), and no coverage of attachments or envelope (C8/C10); against honest mail
+it false-flags a trailing newline (C6). And on this platform specifically,
+`verified` can never mean tamper-evidence, because SES Easy DKIM cannot sign the
+header the guarantee depends on (S1).
+
+The design ideas remain sound — commit per part, bind to context, separate hash
+domains — but the implementation delivered almost none of them, and the spec
+oversold what a bare digest can promise. The reconciled fix plan above is the
+work; until it lands, the honest verdict for an agent is that
+`payload_integrity: verified` means only "a self-consistent hash arrived", which
+against the adversary this protocol names is worth nothing.
+
+This document is the record of getting there. Every finding was executed against
+built code; the attacks that failed are listed so they are not re-run; and the
+one finding the author first failed to reproduce is called out, because a review
+that hides its own missteps is not one you should trust either.
