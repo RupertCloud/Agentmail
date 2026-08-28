@@ -37,6 +37,12 @@ npm run build
 node dist/src/cli.js demo
 ```
 
+Or in a container — the `Dockerfile` is the reproducible build:
+
+```bash
+docker build -t agentmail . && docker run --rm -p 8080:8080 agentmail
+```
+
 `demo` seeds an account with two conversing agents and prints their addresses
 and keys:
 

@@ -9,8 +9,25 @@ npm run build
 node dist/src/cli.js serve
 ```
 
-`railway.json` in the repository root pins the build and start commands and the
-health check, so a deploy is reproducible rather than configured in a console.
+The `Dockerfile` pins the build, so a deploy is reproducible rather than
+configured in a console:
+
+```bash
+docker build -t agentmail .
+docker run --rm -p 8080:8080 -e AGENTMAIL_SECRET="$(openssl rand -base64 32)" agentmail
+```
+
+It is a two-stage build. The runtime stage installs production dependencies only
+— `--omit=dev --include=optional`, which drops TypeScript and keeps the AWS SDK
+that the SES provider imports lazily — copies `dist/src` and the migrations, and
+runs as the non-root `node` user. `PORT` is read from the environment, so a
+platform that injects one works unchanged.
+
+> **Not `railway.json`.** Railway's Config as Code is deprecated: existing config
+> files keep working until 2026-12-01, and from 2026-08-28 a service that never
+> used it cannot opt in. A `railway.json` added now would be silently ignored on
+> such a service. A Dockerfile does the same job, is not deprecated, and is not
+> specific to one host. Railway builds from it automatically when it is present.
 
 ---
 
