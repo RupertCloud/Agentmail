@@ -11,6 +11,12 @@
 > **Working name.** "Silk Relay" is a placeholder chosen to sit alongside Silk NOVA. Replace
 > throughout before this document circulates. Earlier candidate: "Email Guru".
 
+> **Amended.** [Amendment A — Agent Mailboxes](docs/SRS-amendment-a-agents.md) extends this
+> specification to serve AI agents as senders and recipients. It brings inbound processing
+> into scope (changing §1.2), adds a fifth user class, and adds requirements FR-13 to FR-21.
+> Read it alongside this document; everything below still stands unless the amendment names
+> the clause it changes.
+
 ---
 
 ## 1. Introduction
