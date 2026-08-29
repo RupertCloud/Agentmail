@@ -99,8 +99,16 @@ export class MemoryService {
     const { trust, provenance } = await this.classify(agent, input);
 
     // Supersede rather than accumulate: the current answer for a key is one row.
+    //
+    // The old row is retired BEFORE the new one is written, because the schema
+    // carries a unique index over live rows per (agent, key) — inserting first
+    // would collide with the value being replaced. Everything that can reject
+    // the write has already run above, so the window where a key has no live
+    // value is a failed insert only; a store with transactions MUST do both in
+    // one.
     const existing = await this.current(agent, key);
     const now = new Date().toISOString();
+    if (existing) await this.store.updateMemory(existing.id, { supersededAt: now });
 
     const memory = await this.store.createMemory({
       id: newId('mem'),
@@ -119,8 +127,6 @@ export class MemoryService {
       revokedReason: null,
       createdAt: now,
     });
-
-    if (existing) await this.store.updateMemory(existing.id, { supersededAt: now });
 
     await audit(this.store, {
       accountId: agent.accountId,
