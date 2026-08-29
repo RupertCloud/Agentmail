@@ -250,7 +250,7 @@ Schema the sender claims to conform to. Receivers MUST NOT require it.
 
 This is a deliberate limit. Attempts to standardise a universal
 agent-interaction ontology have consistently failed; what survives is a shared
-envelope with domain-specific contents. §13 discusses what a capability
+envelope with domain-specific contents. §14 discusses what a capability
 registry would need to look like if the ecosystem later wants stronger
 guarantees.
 
@@ -406,7 +406,7 @@ The remedy therefore is not agreement but **attenuable signed credentials** —
 SPKI/SDSI (RFC 2693), macaroons, or W3C Verifiable Credentials — in which the
 principal signs an assertion that the agent speaks for it, the agent attenuates
 and forwards it, and a receiver verifies against the principal's key without
-consulting anyone. This is the direction §13.7 asks about, and its cost is key
+consulting anyone. This is the direction §14.7 asks about, and its cost is key
 distribution rather than quorum.
 
 The one genuine echo of Lamport is directional: his signed-message variant
@@ -646,7 +646,7 @@ So the digest converts silent corruption into a detected condition, and — wher
 DKIM covers it — tampering into a detected condition too. It is not an
 end-to-end guarantee. A payload that must be tamper-evident regardless of
 transport needs a signature over the envelope itself (JWS or S/MIME), which
-carries the same key-distribution cost as §13.7 and is not required here.
+carries the same key-distribution cost as §14.7 and is not required here.
 
 The digest also covers the `context` bytes — `principal`, `delegation` and the
 rest travel inside the `application/accp+json` part. A `verified` verdict
@@ -796,6 +796,16 @@ An implementation conforms to the **Memory profile** if:
 An implementation that stores agent memory without provenance does not conform,
 and SHOULD NOT describe its memory as trusted.
 
+### 11.5 Authority profile (optional)
+
+Assesses what backs a principal claim, and keeps that assessment out of the
+sender's reach (§13.2, §13.3).
+
+### 11.6 Bounded conversation profile (optional)
+
+Refuses a reply that extends an unbroken run of messages asserting and
+committing nothing, past a configured ceiling (§13.5).
+
 ---
 
 ## 12. Memory and provenance
@@ -901,7 +911,106 @@ every message either asserts something checkable or commits to something with
 a deadline, so that a thread which is neither converging nor committing can be
 detected and stopped rather than continuing indefinitely at cost.
 
-## 13. Open questions
+## 13. Authority and conversation bounds
+
+These are the two rules §6.2 and §9.4 imply but do not make operational: what
+backs a principal claim, and what stops a conversation that is going nowhere.
+
+### 14.1 The gap
+
+§6.2 states that context is asserted rather than proved, and stops there. That
+leaves a receiver holding a claim with no record of how much stands behind it.
+Acting on an unbacked "I speak for Acme" is precisely acting on an authority
+nobody checked — the confused deputy of §6.3, arriving through the front door.
+
+The protocol cannot close this without a key-distribution scheme it has so far
+avoided (§14.7). It can, and MUST, record the distinction.
+
+### 14.2 Authority assessment
+
+A receiving endpoint MUST compute an authority assessment for every inbound
+message carrying `context.principal`, and MUST NOT read any part of it from the
+message. The verdict:
+
+| Verdict | Condition |
+| --- | --- |
+| `aligned` | The DKIM-signing domain is the domain the principal names, or a parent or subdomain of it. |
+| `unaligned` | A principal is claimed for a domain that signed nothing. |
+| `unauthenticated` | A principal is claimed, but DKIM did not pass, so there is nothing to align against. |
+| `none` | No principal was claimed. |
+
+`aligned` is domain-level `speaks for` and nothing stronger. It means the
+signing domain is willing to be seen asserting that principal. It is **not**
+evidence that the named party authorised anything, and an endpoint MUST NOT
+present it as such.
+
+`unaligned` and `unauthenticated` are distinct on purpose. An unaligned claim is
+one the protocol can say something about — a domain that signed nothing is being
+spoken for. An unauthenticated claim may be perfectly true; there is simply no
+evidence either way, and conflating the two would either defame honest senders
+or launder dishonest ones.
+
+The assessment MUST also carry the self-reported delegation depth and whether it
+is internally consistent — a `chain` longer than the `depth` it declares
+understates how far the authority has travelled, which is the direction an
+attacker understates in — and MUST flag a delegation deeper than the receiving
+agent's ceiling.
+
+### 14.3 Reserved context fields
+
+§6.4 C-1 requires context to be delivered unmodified. Fields that carry the
+*receiver's own findings* are the one exception: an endpoint MUST strip
+`authority`, `integrity`, `verified` and `trust` from inbound context before
+delivery. A sender that can pre-populate the verdict it wants makes the verdict
+worthless, for the same reason a sender-supplied content digest is refused
+(§9.2 I-1). Everything the sender is entitled to assert passes through untouched.
+
+### 14.4 Acting on authority
+
+An endpoint SHOULD gate action-as-principal on `aligned`, with consistent
+delegation inside the ceiling, **and** `verified` payload integrity under
+`dkim: PASS`. The conjunction is the point: knowing who is speaking is worthless
+if the instruction was rewritten in transit, and an intact instruction is
+worthless if the authority behind it is a claim nobody checked. These are
+separate questions and an endpoint MUST expose them separately.
+
+### 14.5 Bounded conversation
+
+§9.4's hop ceiling and per-thread rate bound how deep and how fast a
+conversation runs. Neither notices a thread that is simply going nowhere: two
+agents can stay well inside both and still talk indefinitely. Where deliberation
+is cheap and action is gated, that is the failure agents drift into, and it is
+not solved by refusing to let them talk.
+
+A message earns its place if it does either of two things:
+
+1. **asserts** something checkable — it carries a structured payload; or
+2. **commits** to something with a deadline — it sets `expects.reply_by`.
+
+A reply that does neither is *drift*. Drift MUST be permitted: a clarifying
+question is drift and is often the right message to send. What an endpoint
+SHOULD refuse is an unbroken run of it, past a configured ceiling. The counter
+resets on any message that asserts or commits, so a thread that is getting
+somewhere is never penalised for the prose around it.
+
+An endpoint counting drift MUST count messages, not stored rows, and MUST order
+them by hop count rather than timestamp. A message delivered between two agents
+on the same endpoint is stored twice, and two rows written in the same
+millisecond do not order reliably; either mistake makes the ceiling depend on
+where the counterparty happens to be hosted.
+
+### 14.6 Conformance
+
+An implementation conforms to the **Authority profile** if it computes §13.2 for
+every inbound message with a principal, never reads any part of the assessment
+from the message, strips the §13.3 reserved fields, and exposes authority
+separately from payload integrity and from authentication.
+
+An implementation conforms to the **Bounded conversation profile** if it refuses
+a reply that extends an unbroken run of drift past its ceiling, and resets that
+count on any message that asserts or commits.
+
+## 14. Open questions
 
 1. **Payload semantics.** §5.3 standardises the envelope only. Is a capability
    registry with schema references worth the coordination cost, or does it
@@ -1139,7 +1248,7 @@ Sketched so that anyone attempting it does not have to rediscover it:
   requirement most likely to be missed, and missing it turns a privacy feature
   into an impersonation vector.
 - **How a verifier obtains the verifying key and the issuer's key**, which is
-  the same key-distribution problem as §13.7 in different clothing — moved, not
+  the same key-distribution problem as §14.7 in different clothing — moved, not
   removed.
 - **A statement of what the proof does not cover.** A proof about a principal
   says nothing about payload integrity, and vice versa; §9.2's separation of

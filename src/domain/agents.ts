@@ -17,6 +17,8 @@ export interface CreateAgentInput {
   webhookUrl?: string | null;
   maxHops?: number;
   maxThreadRate?: number;
+  maxDelegationDepth?: number;
+  maxDriftingReplies?: number;
   /**
    * Optional explicit address on a domain the account has verified. Omit to
    * take a hosted address under the platform's agent domain, which needs no
@@ -84,6 +86,8 @@ export class AgentService {
       webhookUrl: input.webhookUrl ?? null,
       maxHops: input.maxHops ?? this.config.defaultMaxHops,
       maxThreadRate: input.maxThreadRate ?? this.config.defaultMaxThreadRate,
+      maxDelegationDepth: input.maxDelegationDepth ?? this.config.defaultMaxDelegationDepth,
+      maxDriftingReplies: input.maxDriftingReplies ?? this.config.defaultMaxDriftingReplies,
       createdAt: new Date().toISOString(),
     });
     await audit(this.store, {
@@ -120,6 +124,8 @@ export class AgentService {
       'webhookUrl',
       'maxHops',
       'maxThreadRate',
+      'maxDelegationDepth',
+      'maxDriftingReplies',
     ] as const) {
       if (patch[field] !== undefined) (allowed as Record<string, unknown>)[field] = patch[field];
     }

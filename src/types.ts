@@ -124,6 +124,14 @@ export interface Agent {
   maxHops: number;
   /** Per-thread ceiling, messages per minute, guarding tight A2A ping-pong. */
   maxThreadRate: number;
+  /** How far delegated authority may have travelled before this agent distrusts it. */
+  maxDelegationDepth: number;
+  /**
+   * Consecutive replies in one thread that neither assert something checkable
+   * nor commit to anything, before the thread is refused. Bounds deliberation
+   * by cost rather than by the participants' good intentions.
+   */
+  maxDriftingReplies: number;
   createdAt: Timestamp;
 }
 
@@ -200,6 +208,35 @@ export interface Address {
   name?: string;
 }
 
+/* ------------------------------------------------------------- authority */
+
+/**
+ * What backs a `context.principal` claim.
+ *
+ * `aligned`         the DKIM-signing domain is the domain being claimed
+ * `unaligned`       a principal is claimed for a domain that signed nothing
+ * `unauthenticated` a principal is claimed, but nothing authenticated to align against
+ * `none`            no principal was claimed
+ */
+export type AuthorityVerdict = 'aligned' | 'unaligned' | 'unauthenticated' | 'none';
+
+export interface AuthorityAssessment {
+  verdict: AuthorityVerdict;
+  /** The principal id as claimed, verbatim. */
+  claimed?: string | null;
+  claimedDomain?: string | null;
+  /** The domain that actually authenticated, when one did. */
+  authenticatedDomain?: string | null;
+  /** Self-reported delegation depth. */
+  delegationDepth?: number | null;
+  /** False when the declared depth understates the chain it ships with. */
+  delegationConsistent?: boolean;
+  /** True when the delegation ran deeper than the receiving agent allows. */
+  depthExceeded?: boolean;
+  /** One sentence a human can read in an audit. */
+  reason: string;
+}
+
 export interface Message {
   id: Id;
   accountId: Id;
@@ -231,6 +268,16 @@ export interface Message {
 
   /** True when this Message-ID was already delivered — a replay or redelivery. */
   isReplay?: boolean;
+
+  /**
+   * What backs the sender's `principal` claim, computed by the receiver.
+   *
+   * Authentication answers "did this domain send it", integrity answers "is the
+   * body what they wrote", and this answers the third, separate question: "is
+   * the authority they invoke one anybody can check". Never read from the
+   * message — a sender that could set its own verdict would make it worthless.
+   */
+  authority?: AuthorityAssessment | null;
 
   /**
    * Whether the payload is the one the sender wrote.

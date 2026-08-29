@@ -1,4 +1,5 @@
 import type { Config } from '../config.js';
+import { assessAuthority, stripReservedContext } from '../domain/authority.js';
 import type { AgentService } from '../domain/agents.js';
 import type { EventService } from '../domain/events.js';
 import type { MailboxNotifier } from '../domain/notifier.js';
@@ -115,6 +116,12 @@ export class InboundService {
     const hops = Number(parsed.headers[HEADER_HOPS.toLowerCase()] ?? '0');
     const now = new Date().toISOString();
 
+    const context = stripReservedContext(parsed.context);
+    const verdictResults = authResults(verdicts);
+    // §6.2 stops at "asserted, not proved". This records how much backs the
+    // assertion, which is the part a recipient across a trust boundary needs.
+    const authority = assessAuthority(context, verdictResults, from, agent);
+
     const message = await this.store.createMessage({
       id: newId('msg'),
       accountId: agent.accountId,
@@ -134,11 +141,15 @@ export class InboundService {
       attachments: parsed.attachments,
       // ACCP §6.4 C-1/C-2: delivered unmodified, and never inferred when absent.
       structured: parsed.structured,
-      context: (parsed.context as Message['context']) ?? null,
+      // Reserved fields are the exception to "unmodified": they are the
+      // receiver's findings, and a sender that could pre-set them would make
+      // the findings worthless.
+      context,
       payloadIntegrity: integrity.payloadIntegrity,
       modifiedParts: integrity.modifiedParts,
       isReplay,
-      authResults: authResults(verdicts),
+      authResults: verdictResults,
+      authority,
       rfcMessageId: parsed.messageId ?? newRfcMessageId(this.config.platformDomain),
       inReplyTo: parsed.inReplyTo,
       references: parsed.references,
@@ -168,6 +179,7 @@ export class InboundService {
       payload_integrity: message.payloadIntegrity ?? null,
       modified_parts: message.modifiedParts ?? [],
       replay: message.isReplay ?? false,
+      authority: message.authority?.verdict ?? null,
     });
     this.notifier.publish(message);
     return message;

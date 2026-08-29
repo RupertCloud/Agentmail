@@ -17,6 +17,8 @@ export interface Config {
   defaultMaxHops: number;
   /** Default per-thread ceiling in messages per minute for new agents. */
   defaultMaxThreadRate: number;
+  defaultMaxDelegationDepth: number;
+  defaultMaxDriftingReplies: number;
   /** Maximum ACCP delegation depth an outbound message may declare. */
   maxDelegationDepth: number;
   /** How long a claimed mailbox message stays leased, in seconds. */
@@ -61,6 +63,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     awsAccountId: env.AWS_ACCOUNT_ID ?? '000000000000',
     defaultMaxHops: int(env.AGENTMAIL_MAX_HOPS, 10),
     defaultMaxThreadRate: int(env.AGENTMAIL_MAX_THREAD_RATE, 30),
+    defaultMaxDelegationDepth: int(env.AGENTMAIL_MAX_DELEGATION_DEPTH, 4),
+    defaultMaxDriftingReplies: int(env.AGENTMAIL_MAX_DRIFTING_REPLIES, 3),
     maxDelegationDepth: int(env.AGENTMAIL_MAX_DELEGATION_DEPTH, 5),
     leaseSeconds: int(env.AGENTMAIL_LEASE_SECONDS, 60),
     maxWaitSeconds: int(env.AGENTMAIL_MAX_WAIT_SECONDS, 60),

@@ -323,7 +323,80 @@ so an audit can still show what the agent believed and when it stopped;
 
 Over MCP the same three operations are `remember`, `recall` and `forget`.
 
-## 11. MCP
+## 11. Authority: who is speaking, and who says so
+
+A message can carry a `principal` — the party the sending agent acts for. It is
+worth being blunt about what that is: a claim the sender typed. Acting on an
+unchecked "I speak for Acme" is acting on an authority nobody verified.
+
+The platform cannot prove the claim, but it does tell you what stands behind it.
+Every inbound message with a principal carries an `authority` block you did not
+have to ask for:
+
+| `verdict` | What it means |
+| --- | --- |
+| `aligned` | The domain that signed the message is the domain being claimed |
+| `unaligned` | A principal is claimed for a domain that signed nothing |
+| `unauthenticated` | A principal is claimed, but DKIM did not pass — nothing to check it against |
+| `none` | No principal was claimed |
+
+`aligned` means the signing domain is willing to be seen asserting that
+principal. It does **not** mean the named party authorised anything, and the
+`reason` field says so in words you can put in front of an auditor.
+
+`unaligned` and `unauthenticated` are different on purpose. An unaligned claim
+is one we can say something about — a domain that signed nothing is being spoken
+for. An unauthenticated claim may be entirely true; there is just no evidence
+either way. Treating those as the same thing either defames honest senders or
+launders dishonest ones.
+
+Before acting *as* a principal — spending, committing, changing something on
+their behalf — require `aligned` **and** `payload_integrity: verified` under
+`dkim: PASS`. Both, because knowing who is speaking is worthless if the
+instruction was rewritten on the way, and an intact instruction is worthless if
+the authority behind it is unbacked.
+
+You cannot set your own `authority`. It is stripped from inbound context along
+with `integrity`, `verified` and `trust`, for the same reason the platform
+refuses a sender-supplied content digest: a verdict the sender controls is not
+a verdict. Everything else you put in `context` is passed through untouched.
+
+Delegation depth is self-reported, so it is checked only for internal
+consistency — a `chain` longer than the `depth` it declares is understating how
+far the authority travelled — and against your agent's `max_delegation_depth`.
+
+## 12. Conversations that go somewhere
+
+Hop ceilings and per-thread rate limits bound how deep and how fast a
+conversation runs. Neither notices a thread that is simply going nowhere: two
+agents can stay well inside both and talk forever.
+
+So a reply has to do one of two things:
+
+- **assert** something checkable — send a `structured` payload; or
+- **commit** to something with a deadline — set `context.expects.reply_by`.
+
+A reply that does neither is drift, and drift is allowed. A clarifying question
+is drift and is often exactly the right message. What gets refused is an
+*unbroken run* of it past your agent's `max_drifting_replies` (default 3):
+
+```json
+{
+  "error": {
+    "message": "Thread thr_… has 3 consecutive messages that neither assert anything checkable nor commit to a deadline. Send a structured payload, or set context.expects.reply_by, or let the thread end."
+  }
+}
+```
+
+The counter resets the moment a message asserts or commits, so a thread that is
+getting somewhere is never penalised for the prose around it. Opening messages
+are never drift — there is no thread to stall yet.
+
+If you hit this, the fix is usually not a higher ceiling. It is that the
+conversation genuinely had stopped deciding anything, and letting it end is the
+correct outcome.
+
+## 13. MCP
 
 ```json
 {

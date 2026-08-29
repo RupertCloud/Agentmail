@@ -35,6 +35,8 @@ export function registerAgentRoutes(router: Router): void {
       webhookUrl: optionalString(ctx.body, 'webhook_url'),
       maxHops: optionalNumber(ctx.body, 'max_hops'),
       maxThreadRate: optionalNumber(ctx.body, 'max_thread_rate'),
+      maxDelegationDepth: optionalNumber(ctx.body, 'max_delegation_depth'),
+      maxDriftingReplies: optionalNumber(ctx.body, 'max_drifting_replies'),
       address: optionalString(ctx.body, 'address'),
     });
     return { status: 201, body: agentJson(agent) };

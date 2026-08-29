@@ -62,6 +62,18 @@ export function messageJson(message: Message, options: { includeBody?: boolean }
           dmarc_method: message.authResults.dmarcMethod ?? 'none',
         }
       : null;
+    base.authority = message.authority
+      ? {
+          verdict: message.authority.verdict,
+          claimed: message.authority.claimed ?? null,
+          claimed_domain: message.authority.claimedDomain ?? null,
+          authenticated_domain: message.authority.authenticatedDomain ?? null,
+          delegation_depth: message.authority.delegationDepth ?? null,
+          delegation_consistent: message.authority.delegationConsistent ?? true,
+          depth_exceeded: message.authority.depthExceeded ?? false,
+          reason: message.authority.reason,
+        }
+      : null;
     base.headers = message.headers;
     base.attachments = message.attachments.map((attachment) => ({
       filename: attachment.filename,
@@ -99,6 +111,8 @@ export function agentJson(agent: Agent): Record<string, unknown> {
     webhook_url: agent.webhookUrl ?? null,
     max_hops: agent.maxHops,
     max_thread_rate: agent.maxThreadRate,
+    max_delegation_depth: agent.maxDelegationDepth,
+    max_drifting_replies: agent.maxDriftingReplies,
     created_at: agent.createdAt,
   };
 }
