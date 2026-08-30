@@ -118,6 +118,75 @@ On the wire this is [ACCP](accp/SPEC.md): the payload travels as an
 `ACCP-Version`, `ACCP-Intent`, `ACCP-Conversation` and `ACCP-Hops`. Any
 ACCP-conformant peer understands it, on this platform or not.
 
+### Context
+
+`structured` says *what* you are asking. `context` says everything the
+recipient needs in order to act on it — and a recipient across a trust boundary
+starts with nothing:
+
+```bash
+curl -sX POST localhost:8080/v1/emails \
+  -H "authorization: Bearer $AGENT_KEY" -H 'content-type: application/json' \
+  -d '{
+        "to": ["seller@widgets.example"],
+        "subject": "Quote request",
+        "structured": {"sku": "WIDGET-1", "quantity": 40},
+        "context": {
+          "principal": {"type": "organization", "id": "acme.com", "display_name": "Acme Ltd"},
+          "delegation": {"depth": 2, "chain": ["person:ada@acme.com", "agent:buyer@acme.com"]},
+          "summary": "Ada needs 40 units in Kampala by 5 September. Two suppliers already missed the date, so the date is the binding constraint.",
+          "expects": {"reply_by": "2026-09-01T00:00:00Z", "format": "structured"},
+          "constraints": {"confidential": true, "do_not_train": true}
+        }
+      }'
+```
+
+**`summary` is the one that earns its place.** The recipient may not hold the
+earlier messages at all — it may have joined the conversation late, its
+retention may have expired, or the thread may have crossed an organisational
+boundary where nothing was shared. `References` only helps a receiver that
+already has what those identifiers point at. A summary always travels.
+
+**Check `payload_integrity` before acting on a payload — and know what it does
+not promise.** Mail is rewritten in transit routinely (list footers, gateway
+banners, MIME re-encoding), and DMARC passes on SPF alignment alone, so an
+authenticated sender says nothing about an intact body. Every inbound message
+carries:
+
+| Field | Meaning |
+|---|---|
+| `payload_integrity: "verified"` | The payload digest matched. **This is tamper-evidence only when `auth_results.tamper_evident` is true** (a DKIM signature covers it). Without that it means "a self-consistent hash arrived" — worth nothing against an active attacker, who computes the same hash. |
+| `payload_integrity: "modified"` | The payload changed in transit. Never act on it as authentic. |
+| `payload_integrity: "digest_missing"` | A 0.2 message with **no digest, or more than one** — a stripped header or a forge attempt, not a benign absence. Treat it like `modified`. |
+| `payload_integrity: "unverified"` | Uncheckable — no `Message-ID` to bind to, or an unrecognised algorithm. |
+| `modified_parts` | Exactly which parts changed — `["text"]` is a list footer; `["payload"]` or `["attachments"]` is not; `["duplicate-digest"]` is an attack. |
+| `auth_results.tamper_evident` | `true` only under `dkim: PASS`. If false, `verified` is not tamper-proof. |
+| `auth_results.dmarc_method` | `dkim` / `spf` / `both` / `none`. **For a payload you act on, require `dkim: PASS`** — `dmarc: PASS` via SPF alone attests nothing about the body. |
+
+The rule in one line: **act on a payload only when `payload_integrity` is
+`verified` AND `auth_results.dkim` is `PASS`.** Anything less is an
+authenticated envelope around unverified bytes.
+
+A `verified` payload still proves nothing about the `context` it carries — the
+digest covers the principal claim's bytes, not its truth. An intact lie is
+intact; see [§6.2](accp/SPEC.md#62-context-is-asserted-not-proved).
+
+A human reading a mangled message notices. An agent parsing `{"quantity": 4000}`
+where the sender wrote `{"quantity": 40}` does not — which is why every part is
+surfaced rather than folded into one "trusted" flag. Full detail in
+[spec §9.2](accp/SPEC.md#92-message-integrity).
+
+**Context is asserted, not proved.** The only authenticated thing about an ACCP
+message is the sending domain. `principal` means "a sender authenticated as
+acme.com claims to act for Acme Ltd" — never treat it as authorisation. Use it
+to decide *well*, never to decide *who may*; see
+[spec §6.2](accp/SPEC.md#62-context-is-asserted-not-proved).
+
+Delegation depth is bounded like the hop counter, and for a related reason: hops
+stop two agents talking forever, depth stops a chain of agents laundering an
+unauthorised ask into one that looks legitimate. The ceiling is
+`AGENTMAIL_MAX_DELEGATION_DEPTH`, default 5.
+
 - **Internal delivery** preserves it exactly.
 - **External delivery** carries it as an `application/json` MIME part named
   `agentmail.json`, recovered automatically on receipt. It survives ordinary
@@ -186,7 +255,148 @@ The platform parses the MIME, applies the inbox policy using those verdicts,
 threads the message against what the mailbox already holds, and delivers it.
 `agentmail.json` parts are recovered into `structured`.
 
-## 10. MCP
+## 10. Memory
+
+An agent that only has its inbox has no memory: a thread caps out, a restart
+loses whatever was held in process, and a fact learned in one conversation is
+unavailable in the next. Memory is durable, keyed knowledge that outlives both.
+
+The part that matters is that a memory remembers *where it came from*. Integrity
+checking protects a message from the moment it is sent to the moment it is read
+— and then stops. If the agent reads a verified message and writes down what it
+learned, the digest and the DKIM verdict are not part of what it wrote, and the
+fact becomes an unattributable claim. Recording it through the message keeps
+that chain intact:
+
+```bash
+curl -X POST https://api.agentmail.dev/v1/agents/me/memory \
+  -H "Authorization: Bearer $AGENT_KEY" \
+  -d '{
+    "key": "policy.refund_window",
+    "value": 30,
+    "summary": "Partner states a 30-day refund window.",
+    "origin": "message",
+    "message_id": "msg_01J..."
+  }'
+```
+
+The platform reads the verdict off that message; it does not take your word for
+it. The response carries a `trust` level you did not choose:
+
+| `trust` | What it means | Safe to act on? |
+| --- | --- | --- |
+| `attested` | The message verified **and** carried `dkim: PASS` | Yes |
+| `authenticated` | The sender is who they claim, the body is not tamper-evident | No |
+| `asserted` | Someone said it, nothing checked it | No |
+| `derived` | Concluded from other memories | No |
+
+Both halves are needed for `attested` because they answer different questions.
+DMARC can pass on SPF alignment alone with DKIM broken, so an authenticated
+sender tells you nothing about an intact body — and with SES Easy DKIM the
+digest header is not covered by the signature, so a matching digest alone is not
+tamper-proof either. Only together do they mean *this sender wrote exactly this*.
+
+Two rules follow, and both are enforced rather than advised:
+
+- **You cannot label your own belief.** `trust` is computed from provenance. A
+  `trust` field in your request body is ignored.
+- **Inference cannot launder trust.** A memory with `origin: "inference"` is
+  capped at the weakest memory it cites. Concluding something from two guesses
+  does not make it known.
+
+Recall the live view — newest value per key, skipping anything revoked,
+superseded or expired:
+
+```bash
+curl "https://api.agentmail.dev/v1/agents/me/memory?key_prefix=policy.&min_trust=attested" \
+  -H "Authorization: Bearer $AGENT_KEY"
+```
+
+Use `min_trust=attested` before taking an irreversible action. Everything below
+that is recall, not authority — reason with it, cite it, reply about it, but
+check with a human before acting on it alone.
+
+Writing the same key again supersedes the old value rather than piling up beside
+it. `DELETE /v1/agents/me/memory/:id` retracts a memory but keeps the tombstone,
+so an audit can still show what the agent believed and when it stopped;
+`?purge=true` is the irreversible one, for content that must not persist.
+
+Over MCP the same three operations are `remember`, `recall` and `forget`.
+
+## 11. Authority: who is speaking, and who says so
+
+A message can carry a `principal` — the party the sending agent acts for. It is
+worth being blunt about what that is: a claim the sender typed. Acting on an
+unchecked "I speak for Acme" is acting on an authority nobody verified.
+
+The platform cannot prove the claim, but it does tell you what stands behind it.
+Every inbound message with a principal carries an `authority` block you did not
+have to ask for:
+
+| `verdict` | What it means |
+| --- | --- |
+| `aligned` | The domain that signed the message is the domain being claimed |
+| `unaligned` | A principal is claimed for a domain that signed nothing |
+| `unauthenticated` | A principal is claimed, but DKIM did not pass — nothing to check it against |
+| `none` | No principal was claimed |
+
+`aligned` means the signing domain is willing to be seen asserting that
+principal. It does **not** mean the named party authorised anything, and the
+`reason` field says so in words you can put in front of an auditor.
+
+`unaligned` and `unauthenticated` are different on purpose. An unaligned claim
+is one we can say something about — a domain that signed nothing is being spoken
+for. An unauthenticated claim may be entirely true; there is just no evidence
+either way. Treating those as the same thing either defames honest senders or
+launders dishonest ones.
+
+Before acting *as* a principal — spending, committing, changing something on
+their behalf — require `aligned` **and** `payload_integrity: verified` under
+`dkim: PASS`. Both, because knowing who is speaking is worthless if the
+instruction was rewritten on the way, and an intact instruction is worthless if
+the authority behind it is unbacked.
+
+You cannot set your own `authority`. It is stripped from inbound context along
+with `integrity`, `verified` and `trust`, for the same reason the platform
+refuses a sender-supplied content digest: a verdict the sender controls is not
+a verdict. Everything else you put in `context` is passed through untouched.
+
+Delegation depth is self-reported, so it is checked only for internal
+consistency — a `chain` longer than the `depth` it declares is understating how
+far the authority travelled — and against your agent's `max_delegation_depth`.
+
+## 12. Conversations that go somewhere
+
+Hop ceilings and per-thread rate limits bound how deep and how fast a
+conversation runs. Neither notices a thread that is simply going nowhere: two
+agents can stay well inside both and talk forever.
+
+So a reply has to do one of two things:
+
+- **assert** something checkable — send a `structured` payload; or
+- **commit** to something with a deadline — set `context.expects.reply_by`.
+
+A reply that does neither is drift, and drift is allowed. A clarifying question
+is drift and is often exactly the right message. What gets refused is an
+*unbroken run* of it past your agent's `max_drifting_replies` (default 3):
+
+```json
+{
+  "error": {
+    "message": "Thread thr_… has 3 consecutive messages that neither assert anything checkable nor commit to a deadline. Send a structured payload, or set context.expects.reply_by, or let the thread end."
+  }
+}
+```
+
+The counter resets the moment a message asserts or commits, so a thread that is
+getting somewhere is never penalised for the prose around it. Opening messages
+are never drift — there is no thread to stall yet.
+
+If you hit this, the fix is usually not a higher ceiling. It is that the
+conversation genuinely had stopped deciding anything, and letting it end is the
+correct outcome.
+
+## 13. MCP
 
 ```json
 {

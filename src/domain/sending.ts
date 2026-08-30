@@ -3,6 +3,7 @@ import { badRequest, forbidden, rateLimited, unprocessable } from '../errors.js'
 import type { Queue } from '../queue/types.js';
 import type { Store } from '../store/types.js';
 import type {
+  AccpContext,
   Account,
   Address,
   Agent,
@@ -57,6 +58,8 @@ export interface SendEmailInput {
   attachments?: Attachment[];
   /** Machine-readable payload for agent recipients. */
   structured?: unknown;
+  /** ACCP context travelling with the payload (spec §6). */
+  context?: AccpContext;
   templateId?: Id;
   variables?: Record<string, unknown>;
   tags?: Record<string, string>;
@@ -105,6 +108,7 @@ export class SendService {
       if (existing) return { message: existing, internal: [], skipped: [] };
     }
 
+    if (input.context) this.assertDelegationBudget(input.context);
     const agent = await this.resolveSendingAgent(account, input, sender);
     const from = this.resolveFrom(input, agent);
     await this.assertSenderAllowed(account, from, agent);
@@ -138,7 +142,11 @@ export class SendService {
 
     const threadId = parent?.threadId ?? newId('thr');
     const hops = agent ? (parent?.hops ?? 0) + 1 : parent?.hops ?? 0;
-    if (agent) await this.assertLoopBudget(agent, threadId, hops);
+    if (agent) {
+      await this.assertLoopBudget(agent, threadId, hops);
+      // Only replies are checked: an opening message has no thread to stall.
+      if (parent) await this.assertConversationProgress(agent, threadId, input);
+    }
 
     const kind: MessageKind = input.kind ?? (agent ? 'agent' : input.campaignId ? 'campaign' : 'transactional');
 
@@ -265,6 +273,26 @@ export class SendService {
     }
   }
 
+  /**
+   * ACCP §6.4 C-3. Delegation depth bounds how far an authority has been passed
+   * along, which is a different failure from a long conversation: the hop
+   * ceiling stops two agents talking forever, this stops a chain of agents
+   * laundering an unauthorised ask into one that looks legitimate.
+   */
+  private assertDelegationBudget(context: AccpContext): void {
+    const depth = context.delegation?.depth;
+    if (depth === undefined) return;
+    if (!Number.isInteger(depth) || depth < 0) {
+      throw badRequest('`context.delegation.depth` must be a non-negative integer.', 'context');
+    }
+    if (depth > this.config.maxDelegationDepth) {
+      throw unprocessable(
+        `Delegation depth ${depth} exceeds the maximum of ${this.config.maxDelegationDepth}.`,
+        'context',
+      );
+    }
+  }
+
   /** FR-3.5: a key scoped to a domain may not send from any other. */
   private async assertKeyDomain(account: Account, from: Address, domainId: Id | null): Promise<void> {
     if (!domainId) return;
@@ -337,6 +365,80 @@ export class SendService {
     if (recent >= agent.maxThreadRate) {
       throw rateLimited(
         `Thread ${threadId} exceeded ${agent.maxThreadRate} messages per minute.`,
+      );
+    }
+  }
+
+  /**
+   * Bounds deliberation by cost rather than by good intentions.
+   *
+   * Hops and rate bound how deep and how fast a conversation runs, but neither
+   * notices a thread that is simply going nowhere: two agents can stay well
+   * inside both ceilings and still talk indefinitely without deciding
+   * anything. This is the failure mode where deliberation is cheap and
+   * unbounded while action is gated, and it is not solved by refusing to let
+   * agents talk.
+   *
+   * A message earns its place if it does either of two things — asserts
+   * something checkable (a structured payload) or commits to something with a
+   * deadline (`expects.reply_by`). A reply that does neither is drift. Drift is
+   * allowed, because a clarifying question is drift and is often the right
+   * message to send; what is not allowed is an unbroken run of it.
+   *
+   * The counter resets on any message that asserts or commits, so a thread that
+   * is getting somewhere is never penalised for the prose around it.
+   */
+  private async assertConversationProgress(
+    agent: Agent,
+    threadId: Id,
+    input: { structured?: unknown; context?: AccpContext | null },
+  ): Promise<void> {
+    const carriesWork =
+      input.structured !== undefined || Boolean(input.context?.expects?.reply_by);
+    if (carriesWork) return;
+
+    const page = await this.store.listMessages({
+      accountId: agent.accountId,
+      threadId,
+      // Two rows per internally delivered message, so ask for headroom.
+      limit: (Math.max(agent.maxDriftingReplies, 1) + 1) * 2,
+    });
+
+    // Deduplicate by Message-ID rather than filtering by direction: an
+    // internally delivered message is stored twice, once for the sender and
+    // once for the recipient, while a thread with an external counterparty has
+    // rows for its own side only. Counting rows would make the ceiling depend
+    // on where the other agent happens to be hosted.
+    const unique = new Map<string, Message>();
+    for (const message of page.data) {
+      if (!unique.has(message.rfcMessageId)) unique.set(message.rfcMessageId, message);
+    }
+
+    // Order by hop count, not by timestamp. Two rows written in the same
+    // millisecond tie-break on id, which is unrelated to conversational order,
+    // so `createdAt` alone interleaves messages and makes this check flap.
+    // Hops increment once per reply and are carried on both copies, which makes
+    // them the one field that actually orders a thread.
+    const ordered = [...unique.values()].sort(
+      (a, b) => b.hops - a.hops || b.createdAt.localeCompare(a.createdAt),
+    );
+
+    // Walk backwards from the most recent message, stopping at the last one
+    // that carried work.
+    let drifting = 0;
+    for (const message of ordered) {
+      const asserted = message.structured !== undefined && message.structured !== null;
+      const committed = Boolean(message.context?.expects?.reply_by);
+      if (asserted || committed) break;
+      drifting += 1;
+    }
+
+    if (drifting >= agent.maxDriftingReplies) {
+      throw unprocessable(
+        `Thread ${threadId} has ${drifting} consecutive messages that neither assert ` +
+          'anything checkable nor commit to a deadline. Send a structured payload, or ' +
+          'set context.expects.reply_by, or let the thread end.',
+        'structured',
       );
     }
   }
@@ -434,6 +536,7 @@ export class SendService {
       headers,
       attachments: parts.attachments,
       structured: parts.input.structured,
+      context: parts.input.context ?? null,
       rfcMessageId: newRfcMessageId(this.config.platformDomain),
       inReplyTo: parts.parent?.rfcMessageId ?? parts.input.inReplyTo ?? null,
       references: parts.parent ? [...parts.parent.references, parts.parent.rfcMessageId] : [],

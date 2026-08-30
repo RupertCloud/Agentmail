@@ -1,4 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
+import { configWarnings } from '../../deployment.js';
 import { verifyUnsubscribe } from '../../domain/unsubscribe.js';
 import { ApiError, badRequest, forbidden } from '../../errors.js';
 import { ACCP_VERSION } from '../../util/mime.js';
@@ -56,7 +57,7 @@ export function registerPublicRoutes(router: Router): void {
       dead_letters:
         ctx.platform.queues.transactional.deadLetters().length +
         ctx.platform.queues.campaign.deadLetters().length,
-      warnings: deploymentWarnings(ctx),
+      warnings: configWarnings(ctx.platform.config, ctx.platform.provider.name),
     },
   }), false);
 
@@ -126,22 +127,6 @@ export function registerPublicRoutes(router: Router): void {
 
   router.get('/u/:token', unsubscribe, false);
   router.post('/u/:token', unsubscribe, false);
-}
-
-/** Surfaced on /health so a misconfigured deployment is visible, not guessed at. */
-function deploymentWarnings(ctx: RequestContext): string[] {
-  const warnings: string[] = [];
-  const config = ctx.platform.config;
-  if (config.secretIsDefault) {
-    warnings.push('AGENTMAIL_SECRET is unset; inbound and event ingest are disabled.');
-  }
-  if (config.store === 'memory') {
-    warnings.push('Store is in-memory: all accounts, mailboxes and messages are lost on restart.');
-  }
-  if (ctx.platform.provider.name === 'memory') {
-    warnings.push('Provider is in-memory: accepted messages are recorded but never sent.');
-  }
-  return warnings;
 }
 
 function escapeHtml(value: string): string {

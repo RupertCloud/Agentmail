@@ -22,6 +22,7 @@ export interface SendMessageInput {
   text?: string;
   html?: string;
   structured?: unknown;
+  context?: unknown;
   cc?: string | string[];
   reply_to?: string | string[];
   in_reply_to?: string;
@@ -119,6 +120,40 @@ export class AgentMailClient {
 
   readThread(agentId: string, threadId: string) {
     return this.request<{ data: Array<Record<string, unknown>> }>('GET', `/v1/agents/${agentId}/threads/${threadId}`);
+  }
+
+  /* memory */
+
+  recall(
+    agentId: string,
+    params: {
+      key?: string;
+      key_prefix?: string;
+      min_trust?: string;
+      thread_id?: string;
+      include_expired?: boolean;
+      include_superseded?: boolean;
+      limit?: number;
+    } = {},
+  ) {
+    return this.request<{ data: Array<Record<string, unknown>> }>(
+      'GET',
+      `/v1/agents/${agentId}/memory`,
+      undefined,
+      params,
+    );
+  }
+
+  remember(agentId: string, body: Record<string, unknown>) {
+    return this.request('POST', `/v1/agents/${agentId}/memory`, body);
+  }
+
+  readMemory(agentId: string, memoryId: string) {
+    return this.request('GET', `/v1/agents/${agentId}/memory/${memoryId}`);
+  }
+
+  forget(agentId: string, memoryId: string, params: { reason?: string; purge?: boolean } = {}) {
+    return this.request('DELETE', `/v1/agents/${agentId}/memory/${memoryId}`, undefined, params);
   }
 
   /* sending and discovery */

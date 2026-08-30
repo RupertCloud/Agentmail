@@ -9,8 +9,25 @@ npm run build
 node dist/src/cli.js serve
 ```
 
-`railway.json` in the repository root pins the build and start commands and the
-health check, so a deploy is reproducible rather than configured in a console.
+The `Dockerfile` pins the build, so a deploy is reproducible rather than
+configured in a console:
+
+```bash
+docker build -t agentmail .
+docker run --rm -p 8080:8080 -e AGENTMAIL_SECRET="$(openssl rand -base64 32)" agentmail
+```
+
+It is a two-stage build. The runtime stage installs production dependencies only
+— `--omit=dev --include=optional`, which drops TypeScript and keeps the AWS SDK
+that the SES provider imports lazily — copies `dist/src` and the migrations, and
+runs as the non-root `node` user. `PORT` is read from the environment, so a
+platform that injects one works unchanged.
+
+> **Not `railway.json`.** Railway's Config as Code is deprecated: existing config
+> files keep working until 2026-12-01, and from 2026-08-28 a service that never
+> used it cannot opt in. A `railway.json` added now would be silently ignored on
+> such a service. A Dockerfile does the same job, is not deprecated, and is not
+> specific to one host. Railway builds from it automatically when it is present.
 
 ---
 
@@ -32,7 +49,9 @@ else can reach the service:
 openssl rand -base64 32
 ```
 
-Set it before the service is publicly reachable. Without it, `/ingest/inbound`
+Set it before the service is publicly reachable. An empty or whitespace-only
+value counts as unset — a blank dashboard field, or `AGENTMAIL_SECRET=$UNSET`,
+will not enable ingest with an empty signing key. Without it, `/ingest/inbound`
 and `/ingest/events` **fail closed with 503** rather than accept a secret that
 anyone who can read the repository already knows. Leaving it unset does not
 expose the endpoints; it disables them.
@@ -56,7 +75,8 @@ into an arbitrary mailbox.
   "warnings": [
     "AGENTMAIL_SECRET is unset; inbound and event ingest are disabled.",
     "Store is in-memory: all accounts, mailboxes and messages are lost on restart.",
-    "Provider is in-memory: accepted messages are recorded but never sent."
+    "Provider is in-memory: accepted messages are recorded but never sent.",
+    "Agent addresses are issued under .test, a reserved TLD that does not resolve..."
   ]
 }
 ```
@@ -76,7 +96,11 @@ A deployment reachable from the internet is not finished until:
    away.
 3. **The provider sends.** See [`ses-setup.md`](ses-setup.md).
 4. **`AGENTMAIL_DOMAIN` is a domain you control**, with DKIM and DMARC published
-   for it. Every hosted agent address inherits its reputation.
+   for it. Every hosted agent address inherits its reputation. Left unset it
+   defaults to `agentmail.test`, and `.test` is reserved by RFC 6761 and never
+   resolves — agents can still reach each other over the internal fast path, but
+   no mail can enter or leave. `/health` warns when the agent domain sits under
+   a reserved TLD.
 5. **`AGENTMAIL_PUBLIC_URL` matches the real hostname**, or unsubscribe links
    point somewhere that does not resolve.
 

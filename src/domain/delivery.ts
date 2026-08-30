@@ -63,6 +63,7 @@ export class DeliveryService {
       headers: message.headers,
       attachments: message.attachments,
       structured: message.structured,
+      context: message.context ?? undefined,
       messageId: message.rfcMessageId,
       inReplyTo: message.inReplyTo,
       references: message.references,

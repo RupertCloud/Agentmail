@@ -124,6 +124,14 @@ export interface Agent {
   maxHops: number;
   /** Per-thread ceiling, messages per minute, guarding tight A2A ping-pong. */
   maxThreadRate: number;
+  /** How far delegated authority may have travelled before this agent distrusts it. */
+  maxDelegationDepth: number;
+  /**
+   * Consecutive replies in one thread that neither assert something checkable
+   * nor commit to anything, before the thread is refused. Bounds deliberation
+   * by cost rather than by the participants' good intentions.
+   */
+  maxDriftingReplies: number;
   createdAt: Timestamp;
 }
 
@@ -150,6 +158,44 @@ export type MessageStatus =
 /** Mailbox lifecycle for inbound messages. Mirrors a lease queue, not a folder. */
 export type MailboxState = 'unread' | 'claimed' | 'acked' | 'archived';
 
+/**
+ * ACCP context — what the recipient needs in order to act on a message
+ * (docs/accp/SPEC.md §6). Every member is asserted by the sender and proved by
+ * nothing but the sending domain's DKIM signature, so it informs a decision and
+ * never authorises one.
+ */
+export interface AccpContext {
+  /** The party the sending agent acts for, as distinct from the agent itself. */
+  principal?: {
+    type: 'organization' | 'person' | 'agent';
+    id: string;
+    display_name?: string;
+  };
+  /** How far the authority behind this request has been passed along. */
+  delegation?: {
+    depth: number;
+    chain?: string[];
+  };
+  /** The conversation so far, in prose, for a recipient that lacks the thread. */
+  summary?: string;
+  expects?: {
+    reply_by?: string;
+    format?: 'structured' | 'prose';
+    schema?: string;
+  };
+  /** Handling rules the sender asks for. Advisory: nothing enforces them. */
+  constraints?: {
+    confidential?: boolean;
+    do_not_forward?: boolean;
+    do_not_train?: boolean;
+    retain_until?: string;
+  };
+  provenance?: {
+    generated_by?: 'model' | 'human' | 'rule';
+    human_reviewed?: boolean;
+  };
+}
+
 export interface Attachment {
   filename: string;
   contentType: string;
@@ -160,6 +206,35 @@ export interface Attachment {
 export interface Address {
   email: string;
   name?: string;
+}
+
+/* ------------------------------------------------------------- authority */
+
+/**
+ * What backs a `context.principal` claim.
+ *
+ * `aligned`         the DKIM-signing domain is the domain being claimed
+ * `unaligned`       a principal is claimed for a domain that signed nothing
+ * `unauthenticated` a principal is claimed, but nothing authenticated to align against
+ * `none`            no principal was claimed
+ */
+export type AuthorityVerdict = 'aligned' | 'unaligned' | 'unauthenticated' | 'none';
+
+export interface AuthorityAssessment {
+  verdict: AuthorityVerdict;
+  /** The principal id as claimed, verbatim. */
+  claimed?: string | null;
+  claimedDomain?: string | null;
+  /** The domain that actually authenticated, when one did. */
+  authenticatedDomain?: string | null;
+  /** Self-reported delegation depth. */
+  delegationDepth?: number | null;
+  /** False when the declared depth understates the chain it ships with. */
+  delegationConsistent?: boolean;
+  /** True when the delegation ran deeper than the receiving agent allows. */
+  depthExceeded?: boolean;
+  /** One sentence a human can read in an audit. */
+  reason: string;
 }
 
 export interface Message {
@@ -184,9 +259,56 @@ export interface Message {
 
   /**
    * Machine-readable payload for agent-to-agent work. Survives external
-   * transport as an `application/json` part named `agentmail.json`.
+   * transport inside the `application/accp+json` part.
    */
   structured?: unknown;
+
+  /** ACCP context travelling with the payload. Sender-asserted; see AccpContext. */
+  context?: AccpContext | null;
+
+  /** True when this Message-ID was already delivered — a replay or redelivery. */
+  isReplay?: boolean;
+
+  /**
+   * What backs the sender's `principal` claim, computed by the receiver.
+   *
+   * Authentication answers "did this domain send it", integrity answers "is the
+   * body what they wrote", and this answers the third, separate question: "is
+   * the authority they invoke one anybody can check". Never read from the
+   * message — a sender that could set its own verdict would make it worthless.
+   */
+  authority?: AuthorityAssessment | null;
+
+  /**
+   * Whether the payload is the one the sender wrote.
+   *
+   * Mail is modified in transit routinely — list footers, gateway banners, URL
+   * rewriting, MIME re-encoding — and DMARC can pass on SPF alignment alone
+   * with DKIM broken, so an authenticated sender says nothing about an intact
+   * body. This records the separate question.
+   *
+   * `verified`   digest present and matching
+   * `modified`   digest present and NOT matching: the payload changed in transit
+   * `unverified` no digest to check against
+   */
+  payloadIntegrity?: 'verified' | 'modified' | 'unverified' | 'digest_missing' | null;
+
+  /**
+   * Which committed parts failed verification. A message may legitimately have
+   * `text` here — a list footer, a gateway banner — while `payload` verifies.
+   */
+  modifiedParts?: string[];
+
+  /** Per-mechanism authentication results, so an agent need not infer them. */
+  authResults?: {
+    spf?: string;
+    dkim?: string;
+    dmarc?: string;
+    /** True only under DKIM pass — a necessary, not sufficient, tamper signal. */
+    tamperEvident?: boolean;
+    /** Which mechanism carried DMARC: `dkim`/`spf`/`both`/`none`. */
+    dmarcMethod?: string;
+  } | null;
 
   /** RFC 5322 Message-ID, angle brackets included. */
   rfcMessageId: string;
@@ -247,6 +369,92 @@ export interface MessageEvent {
   type: MessageEventType;
   occurredAt: Timestamp;
   metadata: Record<string, unknown>;
+}
+
+/* -------------------------------------------------------------- agent memory */
+
+/**
+ * Where a remembered fact came from.
+ *
+ * `message`   an agent read it in a message it received
+ * `inference` the agent concluded it from other memories
+ * `human`     a human told the agent directly, through an authenticated session
+ * `seed`      configured at agent creation; part of the agent's definition
+ */
+export type MemoryOrigin = 'message' | 'inference' | 'human' | 'seed';
+
+/**
+ * How much weight a memory carries. DERIVED from provenance at write time and
+ * never accepted from a caller — an agent must not be able to promote its own
+ * beliefs by asserting a trust level for them.
+ *
+ * `attested`      from a message that verified AND carried DKIM: PASS. The only
+ *                 level at which content is known to be what the sender wrote.
+ * `authenticated` the sender's identity held (DMARC aligned) but the content is
+ *                 not tamper-evident — SPF-only alignment, or no digest.
+ * `asserted`      someone said it and nothing checked: an unverified message, or
+ *                 the agent writing down its own belief.
+ * `derived`       inferred from other memories. Never exceeds the weakest source.
+ */
+export type MemoryTrust = 'attested' | 'authenticated' | 'asserted' | 'derived';
+
+/**
+ * The chain from a remembered fact back to the wire event that produced it.
+ *
+ * This is the part that does the work. ACCP proves a message arrived as sent;
+ * that proof dies the moment an agent reads the message and writes something
+ * down. Carrying the digest and the auth verdict into the memory keeps the
+ * chain intact, so a fact recalled months later can still be traced to a
+ * message whose integrity was actually checked — rather than becoming an
+ * unattributable claim the agent has no way to re-examine.
+ */
+export interface MemoryProvenance {
+  origin: MemoryOrigin;
+  /** The message this came from, for `origin: 'message'`. */
+  messageId?: Id | null;
+  rfcMessageId?: string | null;
+  /** The ACCP-Content-Digest root the message carried, verbatim. */
+  contentDigest?: string | null;
+  /** Who claimed it: the ACCP context principal, else the From address. */
+  assertedBy?: string | null;
+  /** The integrity verdict recorded at the time the message was read. */
+  integrity?: Message['payloadIntegrity'];
+  /** The DKIM verdict at the same moment. */
+  dkim?: string | null;
+  /** Memories this was inferred from, for `origin: 'inference'`. */
+  derivedFrom?: Id[];
+}
+
+/**
+ * One durable fact an agent knows.
+ *
+ * Memory is keyed so that later knowledge supersedes earlier knowledge rather
+ * than accumulating beside it, and revoked by tombstone rather than deletion —
+ * an agent that silently forgot why it believes something is the failure this
+ * whole model exists to prevent. `purge` exists separately for the cases where
+ * the data genuinely has to go.
+ */
+export interface Memory {
+  id: Id;
+  accountId: Id;
+  agentId: Id;
+  /** Stable identifier for the thing known, e.g. `policy.refund_window`. */
+  key: string;
+  value: unknown;
+  /** One line a human can read in an audit without decoding `value`. */
+  summary: string;
+  trust: MemoryTrust;
+  provenance: MemoryProvenance;
+  threadId?: Id | null;
+  /** The memory this replaced, for the same key. */
+  supersedes?: Id | null;
+  /** Set when a later memory took over this key. */
+  supersededAt?: Timestamp | null;
+  /** Knowledge that should go stale rather than persist forever. */
+  expiresAt?: Timestamp | null;
+  revokedAt?: Timestamp | null;
+  revokedReason?: string | null;
+  createdAt: Timestamp;
 }
 
 /* --------------------------------------------------------------- suppression */

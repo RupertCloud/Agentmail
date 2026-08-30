@@ -102,20 +102,34 @@ test('replies thread and the hop counter climbs', async () => {
   assert.equal(buyerInbox[0].threadId, first.message.threadId);
 });
 
-test('the hop ceiling stops a runaway agent loop', async () => {
+test('the hop ceiling stops a loop that is doing work but recursing too deep', async () => {
   const { platform } = newHarness();
   const { account } = await seedAccount(platform, 'acme');
   const { agent: a } = await seedAgent(platform, account, 'ping', { maxHops: 3 });
   const { agent: b } = await seedAgent(platform, account, 'pong', { maxHops: 3 });
 
-  let last = await platform.sending.send(account, { to: b.address, subject: 'ping', text: 'ping' }, a);
+  // Every message asserts something, so the drift guard never fires and the
+  // hop ceiling is what has to stop this. The two bound different failures.
+  const work = (n: number) => ({ step: n });
+
+  let last = await platform.sending.send(
+    account,
+    { to: b.address, subject: 'ping', text: 'ping', structured: work(0) },
+    a,
+  );
   let sender = b;
   let target = a;
 
   for (let i = 0; i < 2; i += 1) {
     last = await platform.sending.send(
       account,
-      { to: target.address, subject: 'Re: ping', text: 'pong', inReplyTo: last.message.rfcMessageId },
+      {
+        to: target.address,
+        subject: 'Re: ping',
+        text: 'pong',
+        structured: work(i + 1),
+        inReplyTo: last.message.rfcMessageId,
+      },
       sender,
     );
     [sender, target] = [target, sender];
@@ -126,7 +140,13 @@ test('the hop ceiling stops a runaway agent loop', async () => {
     () =>
       platform.sending.send(
         account,
-        { to: target.address, subject: 'Re: ping', text: 'pong', inReplyTo: last.message.rfcMessageId },
+        {
+          to: target.address,
+          subject: 'Re: ping',
+          text: 'pong',
+          structured: work(9),
+          inReplyTo: last.message.rfcMessageId,
+        },
         sender,
       ),
     /automated hops/,

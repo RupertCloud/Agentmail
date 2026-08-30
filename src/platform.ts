@@ -8,6 +8,7 @@ import { DomainService } from './domain/domains.js';
 import { EventService } from './domain/events.js';
 import { ListService } from './domain/lists.js';
 import { MailboxService } from './domain/mailbox.js';
+import { MemoryService } from './domain/memory.js';
 import { MailboxNotifier } from './domain/notifier.js';
 import { SendService, type DeliveryJob } from './domain/sending.js';
 import { SuppressionService } from './domain/suppression.js';
@@ -57,6 +58,7 @@ export class Platform {
   readonly delivery: DeliveryService;
   readonly inbound: InboundService;
   readonly mailbox: MailboxService;
+  readonly memory: MemoryService;
 
   readonly queues: { transactional: MemoryQueue<DeliveryJob>; campaign: MemoryQueue<DeliveryJob> };
   readonly worker: PriorityWorker<DeliveryJob>;
@@ -119,6 +121,7 @@ export class Platform {
     );
     this.inbound = new InboundService(this.store, this.config, this.agents, this.events, this.notifier);
     this.mailbox = new MailboxService(this.store, this.config, this.events, this.notifier);
+    this.memory = new MemoryService(this.store);
     this.campaigns = new CampaignService(
       this.store,
       this.config,

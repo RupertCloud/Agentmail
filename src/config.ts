@@ -17,6 +17,10 @@ export interface Config {
   defaultMaxHops: number;
   /** Default per-thread ceiling in messages per minute for new agents. */
   defaultMaxThreadRate: number;
+  defaultMaxDelegationDepth: number;
+  defaultMaxDriftingReplies: number;
+  /** Maximum ACCP delegation depth an outbound message may declare. */
+  maxDelegationDepth: number;
   /** How long a claimed mailbox message stays leased, in seconds. */
   leaseSeconds: number;
   /** Ceiling on long-poll duration, in seconds. */
@@ -44,6 +48,7 @@ function int(value: string | undefined, fallback: number): number {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const platformDomain = env.AGENTMAIL_DOMAIN ?? 'agentmail.test';
+  const configuredSecret = env.AGENTMAIL_SECRET?.trim();
   const port = int(env.PORT, 8080);
   return {
     host: env.HOST ?? '0.0.0.0',
@@ -58,13 +63,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     awsAccountId: env.AWS_ACCOUNT_ID ?? '000000000000',
     defaultMaxHops: int(env.AGENTMAIL_MAX_HOPS, 10),
     defaultMaxThreadRate: int(env.AGENTMAIL_MAX_THREAD_RATE, 30),
+    defaultMaxDelegationDepth: int(env.AGENTMAIL_MAX_DELEGATION_DEPTH, 4),
+    defaultMaxDriftingReplies: int(env.AGENTMAIL_MAX_DRIFTING_REPLIES, 3),
+    maxDelegationDepth: int(env.AGENTMAIL_MAX_DELEGATION_DEPTH, 5),
     leaseSeconds: int(env.AGENTMAIL_LEASE_SECONDS, 60),
     maxWaitSeconds: int(env.AGENTMAIL_MAX_WAIT_SECONDS, 60),
     initialDailySendLimit: int(env.AGENTMAIL_INITIAL_DAILY_LIMIT, 100),
     maxSendAttempts: int(env.AGENTMAIL_MAX_SEND_ATTEMPTS, 5),
-    secret: env.AGENTMAIL_SECRET ?? DEFAULT_SECRET,
+    secret: configuredSecret || DEFAULT_SECRET,
     // Derived from the value, not from whether the variable was set, so
-    // explicitly configuring the published default is caught too.
-    secretIsDefault: (env.AGENTMAIL_SECRET ?? DEFAULT_SECRET) === DEFAULT_SECRET,
+    // explicitly configuring the published default is caught too. An empty or
+    // whitespace-only value counts as unset: a dashboard field left blank, or
+    // `AGENTMAIL_SECRET=$UNSET_VAR`, must not enable ingest with an empty key.
+    secretIsDefault: !configuredSecret || configuredSecret === DEFAULT_SECRET,
   };
 }

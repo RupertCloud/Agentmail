@@ -5,13 +5,13 @@
  * text+html, multipart/mixed for attachments, and the `agentmail.json` part
  * that carries an agent's structured payload across external transport.
  */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { Address, Attachment } from '../types.js';
 import { formatAddressList, parseAddressList } from './email.js';
 
 /* ACCP wire constants — see docs/accp/SPEC.md. Header names carry no `X-`
  * prefix, per RFC 6648. */
-export const ACCP_VERSION = '0.1';
+export const ACCP_VERSION = '0.2';
 export const STRUCTURED_PART_NAME = 'accp.json';
 export const STRUCTURED_MEDIA_TYPE = 'application/accp+json';
 
@@ -24,6 +24,169 @@ export const HEADER_CAPABILITY = 'ACCP-Capability';
 export const HEADER_CORRELATION = 'ACCP-Correlation';
 export const HEADER_IDEMPOTENCY = 'ACCP-Idempotency-Key';
 export const HEADER_EXPIRES = 'ACCP-Expires';
+export const HEADER_CONTENT_DIGEST = 'ACCP-Content-Digest';
+/** Superseded by ACCP-Content-Digest; still read on the way in. */
+export const HEADER_PAYLOAD_DIGEST = 'ACCP-Payload-Digest';
+
+/**
+ * Content commitment (v2), borrowing machinery from proof systems without any
+ * of the zero-knowledge. Hardened after the adversarial review recorded in
+ * docs/accp/integrity-review.md, which broke the v1 scheme.
+ *
+ * 1. **Commit to parts separately.** A list footer rewrites `text`, not
+ *    `payload`. Per-part leaves (payload, text, html, attachments) let a
+ *    receiver say "the prose changed, the payload did not".
+ * 2. **Bind the commitment to the envelope.** Each leaf and the root hash the
+ *    Message-ID *and the From address* (the root also the Date), so a
+ *    (digest, payload) pair cannot be spliced into another message or
+ *    re-enveloped under another sender.
+ * 3. **Length-prefix every field.** The pre-image is injective: no byte inside
+ *    a field — a NUL included — can be read as a boundary. v1's `||0x00||`
+ *    delimiter was not injective.
+ * 4. **Domain separation, versioned.** Labels (`ACCP-leaf-v2`, `ACCP-root-v2`)
+ *    stop a digest computed for one role being reused as another.
+ *
+ * Deliberately *not* copied: a Merkle tree. Logarithmic membership proofs pay
+ * off over thousands of leaves; a message has four. The root binds the set and
+ * gives one value to sign — verified by RECOMPUTING it from content, never
+ * (as v1 did) from the header's own claimed leaves.
+ */
+const LEAF_LABEL = 'ACCP-leaf-v3';
+const ROOT_LABEL = 'ACCP-root-v3';
+
+/**
+ * Content parts committed to, in a fixed order. `attachments` is a single leaf
+ * over the ordered attachment set (C8). The envelope — message-id and sender —
+ * is folded into every leaf and the root (C4, C10) so a payload cannot be
+ * re-enveloped under a different sender and still verify.
+ */
+export const COMMITTED_PARTS = ['payload', 'text', 'html', 'attachments'] as const;
+export type CommittedPart = (typeof COMMITTED_PARTS)[number];
+
+function b64(buffer: Buffer): string {
+  return buffer.toString('base64');
+}
+
+/**
+ * Length-prefixed field, so the hash pre-image is injective: any byte inside a
+ * field — a NUL included — can never be read as a field boundary (fixes C5).
+ * Eight-byte big-endian length, then the UTF-8 bytes.
+ */
+function field(value: string): Buffer {
+  const bytes = Buffer.from(value, 'utf8');
+  const prefix = Buffer.alloc(8);
+  prefix.writeBigUInt64BE(BigInt(bytes.length));
+  return Buffer.concat([prefix, bytes]);
+}
+
+/** The envelope facts every leaf and the root bind to. */
+export interface DigestEnvelope {
+  messageId: string;
+  from: string;
+  date: string;
+}
+
+/** Leaf digest for one named part, bound to the message and its sender. */
+export function partDigest(part: string, env: DigestEnvelope, content: string): string {
+  return b64(
+    createHash('sha256')
+      .update(field(LEAF_LABEL))
+      .update(field(part))
+      .update(field(env.messageId))
+      .update(field(env.from))
+      .update(field(content))
+      .digest(),
+  );
+}
+
+/**
+ * Canonical bytes the `attachments` leaf commits to: the count, then each
+ * attachment's name, type and content hash — every component length-prefixed.
+ *
+ * Delimiters would not do. `contentType` comes from an attacker-controllable
+ * MIME header, so a `.`/`|`-joined encoding lets one crafted attachment forge
+ * as two: put the separator structure inside the content type and the joined
+ * string is byte-identical. Length prefixes make the encoding injective.
+ */
+export function attachmentsContent(attachments: Attachment[] | undefined): string {
+  const list = attachments ?? [];
+  const parts: Buffer[] = [field(String(list.length))];
+  for (const a of list) {
+    const hash = createHash('sha256').update(a.content, 'base64').digest('base64');
+    parts.push(field(a.filename), field(a.contentType), field(hash));
+  }
+  return Buffer.concat(parts).toString('base64');
+}
+
+/**
+ * Binds the leaf set and the envelope together, giving one value to sign.
+ * Length-prefixed throughout, so no leaf value can forge a boundary.
+ */
+export function contentRoot(
+  env: DigestEnvelope,
+  alg: string,
+  leaves: Record<string, string>,
+): string {
+  const hash = createHash('sha256')
+    .update(field(ROOT_LABEL))
+    .update(field(env.messageId))
+    .update(field(env.from))
+    .update(field(env.date))
+    .update(field(alg));
+  for (const part of COMMITTED_PARTS) {
+    hash.update(field(part)).update(field(leaves[part] ?? ''));
+  }
+  return b64(hash.digest());
+}
+
+export interface ContentDigest {
+  alg: string;
+  root: string;
+  leaves: Record<string, string>;
+}
+
+export function formatContentDigest(digest: ContentDigest): string {
+  const parts = COMMITTED_PARTS.filter((p) => digest.leaves[p] !== undefined).map(
+    (p) => `${p}=${digest.leaves[p]}`,
+  );
+  return [`alg=${digest.alg}`, `root=${digest.root}`, ...parts].join('; ');
+}
+
+export function parseContentDigest(header: string | undefined): ContentDigest | null {
+  if (!header) return null;
+  const fields: Record<string, string> = {};
+  for (const piece of header.split(';')) {
+    const idx = piece.indexOf('=');
+    if (idx === -1) continue;
+    const key = piece.slice(0, idx).trim().toLowerCase();
+    // A repeated field is an injection attempt, not something to merge. Counting
+    // header *lines* is not enough: RFC 5322 folding lets an attacker append
+    // `; payload=<forged>` as a continuation of the genuine header, keeping the
+    // line count at one. Refuse the whole header instead of taking last-wins.
+    if (key in fields) return null;
+    fields[key] = piece.slice(idx + 1).trim();
+  }
+  if (!fields.root) return null;
+  const leaves: Record<string, string> = {};
+  for (const part of COMMITTED_PARTS) {
+    if (fields[part]) leaves[part] = fields[part];
+  }
+  return { alg: fields.alg ?? 'sha-256', root: fields.root, leaves };
+}
+
+/** Computes the commitment for a message about to be sent. */
+export function buildContentDigest(
+  env: DigestEnvelope,
+  contents: Partial<Record<CommittedPart, string>>,
+): ContentDigest {
+  const alg = 'sha-256';
+  const leaves: Record<string, string> = {};
+  for (const part of COMMITTED_PARTS) {
+    const content = contents[part];
+    if (content !== undefined) leaves[part] = partDigest(part, env, content);
+  }
+  return { alg, root: contentRoot(env, alg, leaves), leaves };
+}
 
 /**
  * Pre-standard header and part names this implementation emitted before ACCP
@@ -48,6 +211,7 @@ export interface RawMessageInput {
   headers?: Record<string, string>;
   attachments?: Attachment[];
   structured?: unknown;
+  context?: unknown;
   messageId: string;
   inReplyTo?: string | null;
   references?: string[];
@@ -103,21 +267,28 @@ export function buildRawMessage(input: RawMessageInput): string {
   const headers: string[] = [];
   const push = (name: string, value: string) => headers.push(foldHeader(name, value));
 
+  const dateString = (input.date ?? new Date()).toUTCString();
   push('From', formatAddressList([input.from]));
   push('To', formatAddressList(input.to));
   if (input.cc?.length) push('Cc', formatAddressList(input.cc));
   if (input.replyTo?.length) push('Reply-To', formatAddressList(input.replyTo));
   push('Subject', encodeHeaderValue(input.subject));
   push('Message-ID', input.messageId);
-  push('Date', (input.date ?? new Date()).toUTCString());
+  push('Date', dateString);
   push('MIME-Version', '1.0');
   if (input.inReplyTo) push('In-Reply-To', input.inReplyTo);
   if (input.references?.length) push('References', input.references.join(' '));
   for (const [name, value] of Object.entries(input.headers ?? {})) {
+    // C7: never let a caller supply a content-digest header — that is the
+    // sender-side half of the duplicate-header forge. The platform computes the
+    // real one below; other ACCP-* headers (Version, Intent, …) are set by the
+    // trusted send path and pass through.
+    if (/^accp-(content|payload)-digest$/i.test(name.trim())) continue;
     push(name, encodeHeaderValue(value));
   }
 
   const bodyParts: string[] = [];
+  let structuredText: string | undefined;
   const text = input.text ?? '';
   const html = input.html ?? '';
   if (text) bodyParts.push(part('text/plain; charset=UTF-8', text));
@@ -140,9 +311,18 @@ export function buildRawMessage(input: RawMessageInput): string {
   }
 
   const mixedParts: string[] = [];
-  if (input.structured !== undefined) {
+  if (input.structured !== undefined || input.context !== undefined) {
+    // ACCP §5.1: `accp` marks the part as enveloped. Its absence is how a
+    // receiver recognises a 0.1 part, which carried the payload bare.
+    const envelope = {
+      accp: ACCP_VERSION,
+      ...(input.context === undefined ? {} : { context: input.context }),
+      payload: input.structured ?? null,
+    };
+    const envelopeText = JSON.stringify(envelope, null, 2);
+    structuredText = envelopeText;
     mixedParts.push(
-      part(`${STRUCTURED_MEDIA_TYPE}; charset=UTF-8`, JSON.stringify(input.structured, null, 2), [
+      part(`${STRUCTURED_MEDIA_TYPE}; charset=UTF-8`, envelopeText, [
         `Content-Disposition: inline; filename="${STRUCTURED_PART_NAME}"`,
       ]),
     );
@@ -156,6 +336,23 @@ export function buildRawMessage(input: RawMessageInput): string {
         '',
         (attachment.content.match(/.{1,76}/g) ?? []).join('\r\n'),
       ].join('\r\n'),
+    );
+  }
+
+  if (structuredText !== undefined) {
+    const env: DigestEnvelope = { messageId: input.messageId, from: input.from.email, date: dateString };
+    push(
+      HEADER_CONTENT_DIGEST,
+      formatContentDigest(
+        buildContentDigest(env, {
+          payload: structuredText,
+          ...(text ? { text } : {}),
+          ...(html ? { html } : {}),
+          // Always commit the attachment set — an empty leaf still detects an
+          // attachment appended in transit (C8).
+          attachments: attachmentsContent(input.attachments),
+        }),
+      ),
     );
   }
 
@@ -185,6 +382,8 @@ function wrapParts(bound: string, parts: string[]): string {
 
 export interface ParsedMessage {
   headers: Record<string, string>;
+  /** How many raw ACCP-Content-Digest header lines were present (C0). */
+  contentDigestCount: number;
   from: Address[];
   to: Address[];
   cc: Address[];
@@ -196,6 +395,9 @@ export interface ParsedMessage {
   text: string | null;
   html: string | null;
   structured: unknown;
+  context: unknown;
+  /** Decoded bytes of the envelope part, for digest verification. */
+  structuredRaw: string | null;
   attachments: Attachment[];
 }
 
@@ -206,8 +408,16 @@ export function parseRawMessage(raw: string): ParsedMessage {
   const body = split === -1 ? '' : normalized.slice(split + 2);
   const headers = parseHeaders(headerBlock);
 
+  // C0: count raw ACCP-Content-Digest header lines *before* folding merges them.
+  // More than one is a forge attempt, and the verifier must refuse to trust any.
+  const unfolded = headerBlock.replace(/\n[ \t]+/g, ' ');
+  const contentDigestCount = unfolded
+    .split('\n')
+    .filter((line) => /^accp-content-digest\s*:/i.test(line)).length;
+
   const result: ParsedMessage = {
     headers,
+    contentDigestCount,
     from: parseAddressList(headers.from),
     to: parseAddressList(headers.to),
     cc: parseAddressList(headers.cc),
@@ -219,6 +429,8 @@ export function parseRawMessage(raw: string): ParsedMessage {
     text: null,
     html: null,
     structured: undefined,
+    context: undefined,
+    structuredRaw: null,
     attachments: [],
   };
 
@@ -268,8 +480,17 @@ function walkPart(headers: Record<string, string>, body: string, out: ParsedMess
     (mediaType === 'application/json' &&
       (filename === STRUCTURED_PART_NAME || filename === LEGACY_PART_NAME));
   if (isStructured) {
+    const envelopeText = decoded.toString('utf8');
+    out.structuredRaw = envelopeText;
     try {
-      out.structured = JSON.parse(decoded.toString('utf8'));
+      const parsed = JSON.parse(envelopeText);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'accp' in parsed) {
+        out.structured = (parsed as Record<string, unknown>).payload;
+        out.context = (parsed as Record<string, unknown>).context;
+      } else {
+        // ACCP 0.1: the part was the payload itself, and carried no context.
+        out.structured = parsed;
+      }
     } catch {
       out.structured = undefined;
     }
@@ -283,8 +504,10 @@ function walkPart(headers: Record<string, string>, body: string, out: ParsedMess
     });
     return;
   }
-  if (mediaType === 'text/plain' && out.text == null) out.text = decoded.toString('utf8').trim();
-  else if (mediaType === 'text/html' && out.html == null) out.html = decoded.toString('utf8').trim();
+  // C6: do NOT trim. The sender commits over the exact decoded bytes; trimming
+  // here would false-report `modified` on any prose with a trailing newline.
+  if (mediaType === 'text/plain' && out.text == null) out.text = decoded.toString('utf8');
+  else if (mediaType === 'text/html' && out.html == null) out.html = decoded.toString('utf8');
 }
 
 function splitOnBoundary(body: string, bound: string): string[] {

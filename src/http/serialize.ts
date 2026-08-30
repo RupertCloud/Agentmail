@@ -5,6 +5,7 @@ import type {
   Contact,
   ContactList,
   Domain,
+  Memory,
   Message,
   MessageEvent,
   Suppression,
@@ -48,6 +49,31 @@ export function messageJson(message: Message, options: { includeBody?: boolean }
     base.text = message.text;
     base.html = message.html;
     base.structured = message.structured ?? null;
+    base.context = message.context ?? null;
+    base.payload_integrity = message.payloadIntegrity ?? null;
+    base.modified_parts = message.modifiedParts ?? [];
+    base.is_replay = message.isReplay ?? false;
+    base.auth_results = message.authResults
+      ? {
+          spf: message.authResults.spf ?? null,
+          dkim: message.authResults.dkim ?? null,
+          dmarc: message.authResults.dmarc ?? null,
+          tamper_evident: message.authResults.tamperEvident ?? false,
+          dmarc_method: message.authResults.dmarcMethod ?? 'none',
+        }
+      : null;
+    base.authority = message.authority
+      ? {
+          verdict: message.authority.verdict,
+          claimed: message.authority.claimed ?? null,
+          claimed_domain: message.authority.claimedDomain ?? null,
+          authenticated_domain: message.authority.authenticatedDomain ?? null,
+          delegation_depth: message.authority.delegationDepth ?? null,
+          delegation_consistent: message.authority.delegationConsistent ?? true,
+          depth_exceeded: message.authority.depthExceeded ?? false,
+          reason: message.authority.reason,
+        }
+      : null;
     base.headers = message.headers;
     base.attachments = message.attachments.map((attachment) => ({
       filename: attachment.filename,
@@ -85,7 +111,38 @@ export function agentJson(agent: Agent): Record<string, unknown> {
     webhook_url: agent.webhookUrl ?? null,
     max_hops: agent.maxHops,
     max_thread_rate: agent.maxThreadRate,
+    max_delegation_depth: agent.maxDelegationDepth,
+    max_drifting_replies: agent.maxDriftingReplies,
     created_at: agent.createdAt,
+  };
+}
+
+export function memoryJson(memory: Memory): Record<string, unknown> {
+  return {
+    id: memory.id,
+    object: 'memory',
+    agent_id: memory.agentId,
+    key: memory.key,
+    value: memory.value,
+    summary: memory.summary,
+    trust: memory.trust,
+    provenance: {
+      origin: memory.provenance.origin,
+      message_id: memory.provenance.messageId ?? null,
+      rfc_message_id: memory.provenance.rfcMessageId ?? null,
+      content_digest: memory.provenance.contentDigest ?? null,
+      asserted_by: memory.provenance.assertedBy ?? null,
+      integrity: memory.provenance.integrity ?? null,
+      dkim: memory.provenance.dkim ?? null,
+      derived_from: memory.provenance.derivedFrom ?? [],
+    },
+    thread_id: memory.threadId ?? null,
+    supersedes: memory.supersedes ?? null,
+    superseded_at: memory.supersededAt ?? null,
+    expires_at: memory.expiresAt ?? null,
+    revoked_at: memory.revokedAt ?? null,
+    revoked_reason: memory.revokedReason ?? null,
+    created_at: memory.createdAt,
   };
 }
 
